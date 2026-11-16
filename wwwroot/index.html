@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>AgentMux</title>
+<link rel="stylesheet" href="lib/xterm.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <aside id="sidebar">
+    <div id="side-head"><span>groups</span><button id="btn-new-group" title="New group (Ctrl+Shift+N)">[+]</button></div>
+    <div id="groups"></div>
+    <div id="side-foot">
+      <button id="btn-config" title="Edit profiles / font / gpu (restart to apply)">config</button>
+      <button id="btn-help" title="Keyboard shortcuts">keys</button>
+    </div>
+  </aside>
+
+  <main id="main">
+    <div id="toolbar">
+      <span id="tb-title"></span>
+      <span id="tb-cwd"></span>
+      <span class="spacer"></span>
+      <span class="tb-label">layout</span>
+      <span id="tb-layouts"></span>
+      <span class="sep">│</span>
+      <span id="tb-add"></span>
+      <span class="sep">│</span>
+      <button id="tb-fork" title="Fork the focused Claude session into a new pane (Ctrl+Shift+F)">fork</button>
+    </div>
+    <div id="views">
+      <div id="welcome">
+        <p>no groups yet</p>
+        <button id="btn-welcome">[+ new group]</button>
+      </div>
+    </div>
+  </main>
+
+  <div id="toasts"></div>
+
+  <div id="modal" class="hidden">
+    <div class="dialog" id="dlg-group">
+      <h3>new group</h3>
+      <label>name<input id="ng-name" placeholder="my-project" spellcheck="false"></label>
+      <label>working folder
+        <span class="row"><input id="ng-cwd" placeholder="~/path/to/project" spellcheck="false"><button id="ng-browse">browse</button></span>
+      </label>
+      <label>start terminals with<select id="ng-profile"></select></label>
+      <label>layout<select id="ng-layout"></select></label>
+      <div class="actions">
+        <button id="ng-cancel">cancel</button>
+        <button id="ng-ok" class="primary">create</button>
+      </div>
+    </div>
+    <div class="dialog hidden" id="dlg-text">
+      <h3 id="tx-title"></h3>
+      <p id="tx-info"></p>
+      <label><span id="tx-label"></span><input id="tx-input" spellcheck="false"></label>
+      <div class="actions">
+        <button id="tx-cancel">cancel</button>
+        <button id="tx-ok" class="primary">ok</button>
+      </div>
+    </div>
+    <div class="dialog hidden" id="dlg-help">
+      <h3>keys</h3>
+      <table>
+        <tr><td>Ctrl+Shift+N</td><td>new group</td></tr>
+        <tr><td>Ctrl+Shift+PgUp/PgDn</td><td>previous / next group</td></tr>
+        <tr><td>Ctrl+Shift+T</td><td>new terminal (group's profile)</td></tr>
+        <tr><td>Ctrl+Shift+D / E</td><td>split pane right / down</td></tr>
+        <tr><td>Ctrl+Shift+Arrows</td><td>move focus between panes</td></tr>
+        <tr><td>Ctrl+Shift+Z</td><td>fullscreen pane on/off</td></tr>
+        <tr><td>Ctrl+Shift+F</td><td>fork the focused Claude session</td></tr>
+        <tr><td>Ctrl+Shift+J</td><td>jump to the next pane that needs an answer</td></tr>
+        <tr><td>Ctrl+Shift+R / W</td><td>restart / close pane</td></tr>
+        <tr><td>Ctrl+Shift+B</td><td>toggle sidebar</td></tr>
+        <tr><td>Ctrl+Shift+ = / - / 0</td><td>font bigger / smaller / reset</td></tr>
+        <tr><td>Ctrl+C with selection</td><td>copy</td></tr>
+        <tr><td>Ctrl+V, Ctrl+Shift+V</td><td>paste</td></tr>
+        <tr><td>right-click</td><td>copy selection, or paste</td></tr>
+        <tr><td>Shift+Enter</td><td>newline in the Claude prompt</td></tr>
+        <tr><td>double-click</td><td>rename (group, pane title, sidebar entry)</td></tr>
+      </table>
+      <p class="legend">sidebar: <b class="g-working">|</b> working &nbsp; <b class="g-ask">!</b> needs your answer &nbsp; <b class="g-done">✓</b> done &nbsp; <b class="g-dead">x</b> exited &nbsp; ○ not started</p>
+      <div class="actions"><button id="help-close" class="primary">close</button></div>
+    </div>
+  </div>
+
+  <script src="lib/xterm.js"></script>
+  <script src="lib/addon-fit.js"></script>
+  <script src="lib/addon-webgl.js"></script>
+  <script src="lib/addon-unicode11.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
