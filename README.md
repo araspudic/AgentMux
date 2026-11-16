@@ -1,7 +1,7 @@
 # AgentMux
 
 A small tmux-style terminal multiplexer for Linux (Ubuntu), made for running several
-Claude Code / Copilot CLI sessions side by side.
+GitHub Copilot CLI / Claude Code sessions side by side. Copilot is the default profile.
 
 - **Groups** in the left sidebar (one per project/folder), each with its own terminals.
 - **Split layouts** per group: presets (`1`, `1|1`, `1|1|1`, `1|2`, `2|1`, `1|3`, `2x2`, `1/1`) or custom
@@ -10,7 +10,8 @@ Claude Code / Copilot CLI sessions side by side.
 - **Agent status** per pane in the sidebar and pane header: `|/-\` spinner = working, blinking `!` = needs your
   answer (permission prompt or question), green `✓` = finished your request, `x` = exited.
 - "Needs your answer" pops a toast bottom-right (and a desktop notification when the window isn't focused);
-  clicking it opens that pane. Ctrl+Shift+J jumps to the next pane that's asking.
+  clicking it opens that pane. Ctrl+Shift+J jumps to the next pane that's asking. Desktop notifications need a
+  notification daemon (GNOME/KDE have one; on XFCE: `sudo apt install xfce4-notifyd`).
 - **Fork** (toolbar `fork`, pane `Y`, Ctrl+Shift+F): forks the focused Claude session
   (`claude --resume <id> --fork-session`) into a new named pane. Double-click a pane/group name to rename.
 - Claude panes resume their own conversation after an app restart (↻ restart = fresh session).
@@ -43,8 +44,15 @@ sudo apt install nodejs npm build-essential python3
 
 Claude panes are started with `--settings ~/.config/AgentMux/claude-hooks.json`. Those Claude Code hooks
 (prompt submitted, permission/question asked, tool finished, notification, stop) report the state and session id
-to AgentMux over a token-protected local socket on 127.0.0.1. Copilot has no hooks, so its state is inferred from
-its output (activity bursts and on-screen question prompts).
+to AgentMux over a token-protected local socket on 127.0.0.1.
+
+Copilot has no hooks, so AgentMux reads the bottom of its screen while it's drawing:
+
+1. a permission prompt (`Do you want to run this command?`), a numbered choice menu (`❯ 1. …` / `↑↓ … Enter to select`)
+   or a y/n prompt → **needs your answer** — this wins even while Copilot keeps animating;
+2. a busy hint (`Esc to cancel`, `esc to interrupt`) → **working**;
+3. otherwise output activity: a burst of output → working, output stops → **done** — or **needs your answer**
+   if its last words were a question to you ("Would you like me to …?").
 
 ## Config
 

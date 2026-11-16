@@ -247,8 +247,8 @@ function createPane(node, g) {
   const p = {
     id: node.id, node, groupId: g.id, term, fit, el, body, glyph, nameEl: name, titleEl: title, sel, zoomBtn, forkBtn,
     opened: false, started: false, alive: false, title: '', kind: null,
-    agent: 'idle', askMsg: null, hooked: false, answeredRow: -1,
-    lastOut: 0, lastInput: 0, burstStart: 0, burstLast: 0, quietT: 0,
+    agent: 'idle', askMsg: null, hooked: false, answeredQ: null, sawBusy: false, lastBusy: 0,
+    lastOut: 0, lastInput: 0, burstStart: 0, burstLast: 0, workStart: 0, quietT: 0, scanT: 0,
     sideGlyph: null, fitQueued: false, startCmd: null, resumeOnStart: false,
   };
   panes.set(node.id, p);
@@ -282,7 +282,8 @@ function createPane(node, g) {
     renderSidebarSoon();
   });
   term.onBell(() => {
-    if (p.kind && !p.hooked && p.agent === 'working') setAgent(p, 'done');
+    // agents ring the bell both when they finish and when they need you: look at the screen to tell which
+    if (p.kind && !p.hooked) scheduleScan(p, 150);
     else if (!isWatching(p)) send({ type: 'flash' });
   });
 
@@ -348,7 +349,8 @@ function spawn(p) {
   p.resumeOnStart = false;
   p.kind = agentKind(p.node.profile);
   p.started = true; p.alive = true; p.hooked = false;
-  p.lastOut = 0; p.burstStart = 0; p.answeredRow = -1;
+  p.lastOut = 0; p.burstStart = 0; p.workStart = 0;
+  p.answeredQ = null; p.sawBusy = false; p.lastBusy = 0;
   setAgent(p, 'idle');
   send({ type: 'spawn', id: p.id, command, cwd: (g && g.cwd) || '', cols: p.term.cols, rows: p.term.rows });
   updateGlyphs(p);
@@ -393,52 +395,127 @@ function isWatching(p) {
 // Claude panes report exactly via hooks (see main.js). Other agents (Copilot) are inferred from
 // output activity and from what the screen shows when the output stops.
 
-const QUESTION_RE = /(do you want to[^\n]*|would you like to[^\n]*\?|allow [^\n]*\?|approve [^\n]*\?|\((?:y\/n|y\/N|Y\/n)\)|\[(?:y\/n|y\/N|Y\/n)\]|❯\s*1\.\s*(?:yes|allow|approve)[^\n]*)/i;
+// Non-hooked agents (Copilot): the bottom of the screen is scanned while output is streaming (TUIs keep
+// redrawing even while they wait for you, so "output went quiet" alone can't tell asking from working).
+//   1. a permission prompt / multiple-choice menu / y-n prompt on screen -> ask   (always wins)
+//   2. a "working" hint ("Esc to cancel", "esc to interrupt") on screen  -> working
+//   3. otherwise output activity: a burst of output -> working; quiet after work -> done
+//      (or ask, if the agent's last words were a question to you: "Would you like me to …?")
+const STRONG_ASK_RE = /(do you want to [^\n]*|allow [^\n]{2,80}\?|approve [^\n]{2,80}\?|\((?:y\/n|yes\/no)\)|\[(?:y\/n|yes\/no)\])/i;
+const SOFT_ASK_RE = /(would you like|do you want|want me to|shall i|should i|which (?:one|option)|please (?:confirm|choose|select|pick))[^\n]*\?/i;
+const MENU_ITEM_RE = /^[\s│┃║|]*(?:[❯›▶►>→●◉]\s*)?(?:\d{1,2}[.)]|\[\d{1,2}\])\s+\S/;
+const MENU_CURSOR_RE = /^[\s│┃║|]*[❯›▶►>→●◉]\s*(?:\d{1,2}[.)]|\[\d{1,2}\])\s+\S/;
+const MENU_HINT_RE = /(↑\s*\/?\s*↓|arrow keys|number keys|enter to (?:select|confirm|submit|choose)|to navigate|confirm with|(?:press|type) (?:a )?number)/i;
+const BUSY_RE = /\b(?:esc|escape|ctrl\+c)\s+to\s+(?:cancel|interrupt|stop)\b/i;
+const PROMPT_LINE_RE = /^[\s│┃║|]*[>❯$#]\s/; // your own input / echoed prompt lines
+const cleanLine = (s) => s.replace(/[│┃║╭╮╰╯─━┌┐└┘]/g, ' ').replace(/\s+/g, ' ').trim();
 
 function onOutput(p, data) {
   p.term.write(data);
   const now = Date.now();
   p.lastOut = now;
   if (!p.kind || p.hooked) return;
-  if (now - p.lastInput < 400) return; // echo of what you typed
-  if (!p.burstStart || now - p.burstLast > 1500) p.burstStart = now;
-  p.burstLast = now;
-  if (p.agent !== 'working' && p.agent !== 'ask' && now - p.burstStart > 1200) setAgent(p, 'working');
-  clearTimeout(p.quietT);
-  p.quietT = setTimeout(() => onQuiet(p), 1500);
-}
-
-// output stopped (non-hooked agents): a question on screen -> ask; long busy period -> done
-function onQuiet(p) {
-  if (p.hooked || !p.alive) return;
-  const q = findQuestion(p);
-  if (q) setAgent(p, 'ask', q);
-  else if (p.agent === 'working') setAgent(p, p.burstLast - p.burstStart > 3000 ? 'done' : 'idle');
-  p.burstStart = 0;
-}
-
-function findQuestion(p) {
-  const b = p.term.buffer.active;
-  const cur = b.baseY + b.cursorY;
-  const from = Math.max(cur - 12, p.answeredRow + 1, 0);
-  const lines = [];
-  for (let i = from; i <= Math.min(b.length - 1, cur + 2); i++) {
-    const l = b.getLine(i);
-    lines.push(l ? l.translateToString(true) : '');
+  if (now - p.lastInput > 400) { // not just the echo of what you typed
+    if (!p.burstStart || now - p.burstLast > 1500) p.burstStart = now;
+    p.burstLast = now;
   }
-  const m = lines.join('\n').match(QUESTION_RE);
-  return m ? m[0].replace(/\s+/g, ' ').trim().slice(0, 140) : null;
+  scheduleScan(p, 250);
+  clearTimeout(p.quietT);
+  p.quietT = setTimeout(() => { p.burstStart = 0; scanScreen(p); }, 1500);
+}
+
+function scheduleScan(p, ms) {
+  if (p.scanT) return;
+  p.scanT = setTimeout(() => { p.scanT = 0; scanScreen(p); }, ms);
+}
+
+// the last ~25 non-empty rows of the visible screen (not the scrollback)
+function screenTail(p, n = 25) {
+  const b = p.term.buffer.active;
+  const text = (i) => { const l = b.getLine(i); return l ? l.translateToString(true) : ''; };
+  let last = b.baseY + p.term.rows - 1;
+  while (last > b.baseY && !text(last).trim()) last--;
+  const out = [];
+  for (let i = Math.max(b.baseY, last - n + 1); i <= last; i++) out.push(text(i));
+  return out;
+}
+
+// a prompt that blocks the agent until you answer -> its question text, else null
+function strongQuestion(lines) {
+  const items = [];
+  lines.forEach((l, i) => { if (MENU_ITEM_RE.test(l) && !PROMPT_LINE_RE.test(l.replace(/^[\s│┃║|]*[❯›▶►→●◉]/, ''))) items.push(i); });
+  const text = lines.join('\n');
+  const menu = items.length >= 2 && (items.some((i) => MENU_CURSOR_RE.test(lines[i])) || MENU_HINT_RE.test(text));
+  const m = text.match(STRONG_ASK_RE);
+  if (!menu && !m) return null;
+  if (menu) {
+    // the question is normally just above the options
+    for (let i = items[0] - 1; i >= Math.max(0, items[0] - 8); i--) {
+      const t = cleanLine(lines[i]);
+      if (t.endsWith('?')) return t.slice(0, 140);
+    }
+  }
+  return m ? cleanLine(m[0]).slice(0, 140) : 'waiting for your choice';
+}
+
+// the agent's last words were a question to you
+function softQuestion(lines) {
+  const tail = lines.filter((l) => cleanLine(l)).slice(-8);
+  for (let i = tail.length - 1; i >= 0; i--) {
+    if (PROMPT_LINE_RE.test(tail[i])) continue;
+    const m = cleanLine(tail[i]).match(SOFT_ASK_RE);
+    if (m) return cleanLine(tail[i]).slice(0, 140);
+  }
+  return null;
+}
+
+function scanScreen(p) {
+  if (!p.kind || p.hooked || !p.alive) return;
+  const now = Date.now();
+  const lines = screenTail(p);
+  const q = strongQuestion(lines);
+  // a question you've just answered stays ignored until it has left the screen
+  if (p.answeredQ && q !== p.answeredQ) p.answeredQ = null;
+  if (q && q !== p.answeredQ) { setAgent(p, 'ask', q); return; }
+  const quiet = now - p.lastOut >= 1400;
+  if (BUSY_RE.test(lines.join('\n'))) {
+    p.sawBusy = true;
+    p.lastBusy = now;
+    if (p.agent !== 'working') startWorking(p, now);
+    return;
+  }
+  if (p.agent === 'ask') { // question gone without us seeing the answer key (e.g. answered by mouse)
+    if (quiet) setAgent(p, 'idle'); else startWorking(p, now);
+    return;
+  }
+  if (p.agent === 'working') {
+    // finished? with a known busy hint: the hint is gone; otherwise: output stopped
+    const finished = p.sawBusy ? now - p.lastBusy > 1200 && now - p.lastInput > 2500 : quiet;
+    if (!finished) { if (p.sawBusy) scheduleScan(p, 1300); return; }
+    const soft = now - p.workStart > 2000 && softQuestion(lines);
+    if (soft) setAgent(p, 'ask', soft);
+    else setAgent(p, now - p.workStart > 2500 ? 'done' : 'idle');
+    return;
+  }
+  // idle / done: a sustained burst of output means the agent started working
+  // (agents that show a busy hint are only "working" while it's visible)
+  if (!p.sawBusy && !quiet && p.burstStart && p.burstLast - p.burstStart > 1200) startWorking(p, p.burstStart);
+}
+
+function startWorking(p, since) {
+  p.workStart = since;
+  setAgent(p, 'working');
 }
 
 function onUserInput(p, d) {
   if (!p.kind) return;
-  if (d.includes('\r')) {
-    if (p.agent === 'ask') {
-      const b = p.term.buffer.active;
-      p.answeredRow = b.baseY + b.cursorY; // don't re-detect the question we just answered
-      setAgent(p, 'working');
-    } else if (p.agent === 'done') setAgent(p, 'idle');
-  } else if (d === '\x1b' && p.agent === 'ask') {
+  const answer = d.includes('\r') || d === '\x1b' || (p.agent === 'ask' && /^[0-9yYnN]$/.test(d));
+  if (!answer) return;
+  if (p.agent === 'ask') {
+    if (!p.hooked) p.answeredQ = p.askMsg;
+    if (d === '\x1b') setAgent(p, 'idle'); else startWorking(p, Date.now());
+    if (!p.hooked) setTimeout(() => scanScreen(p), 2600);
+  } else if (d.includes('\r') && p.agent === 'done') {
     setAgent(p, 'idle');
   }
 }
@@ -471,7 +548,8 @@ function setAgent(p, state, msg) {
   p.agent = state;
   p.askMsg = msg;
   if (state === 'ask') {
-    if (!isWatching(p)) {
+    if (prev === 'ask') { updateToast(p); }
+    else if (!isWatching(p)) {
       showToast(p);
       const g = groupById(p.groupId);
       send({ type: 'notify', id: p.id, title: `${g ? g.name : ''} › ${paneName(p)} needs your input`, body: msg });
@@ -533,6 +611,11 @@ function showToast(p) {
     h('button', { class: 't-close', text: 'x', title: 'Dismiss', onclick: (e) => { e.stopPropagation(); removeToast(p.id); } }));
   $('#toasts').append(el);
   toasts.set(p.id, el);
+}
+function updateToast(p) {
+  const el = toasts.get(p.id);
+  const msg = el && el.querySelector('.t-msg');
+  if (msg) msg.textContent = p.askMsg || 'needs your input';
 }
 function removeToast(id) {
   const el = toasts.get(id);
@@ -742,6 +825,7 @@ function destroyPane(p) {
   if (p.alive) send({ type: 'kill', id: p.id });
   p.alive = false;
   clearTimeout(p.quietT);
+  clearTimeout(p.scanT);
   removeToast(p.id);
   p.ro.disconnect();
   try { p.term.dispose(); } catch {}

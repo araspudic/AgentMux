@@ -1,11 +1,11 @@
 {
   "name": "agentmux",
   "productName": "AgentMux",
-  "version": "1.0.0",
-  "description": "tmux-style terminal multiplexer for Claude Code / Copilot CLI sessions",
+  "version": "1.0.1",
+  "description": "tmux-style terminal multiplexer for Copilot CLI / Claude Code sessions",
   "author": { "name": "AgentMux", "email": "agentmux@localhost" },
-  "homepage": "https://localhost/agentmux",
-  "license": "MIT",
+  "homepage": "https://github.com/araspudic/AgentMux",
+  "license": "UNLICENSED",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

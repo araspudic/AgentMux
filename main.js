@@ -28,17 +28,19 @@ const DEFAULT_CONFIG = {
   // "auto": use the GPU only if the machine has one (no /dev/dri render node, or an RDP session = software only).
   // Chromium's software GPU emulation is very CPU-heavy, so "off" is much faster on VMs.
   gpu: 'auto',
-  defaultProfile: 'Claude',
+  configVersion: 2,
+  defaultProfile: 'Copilot',
   // command: what a new pane runs ($SHELL -lc "<command>").
   // resume / fork: used when AgentMux knows the Claude session id ({session}) — after an app restart / for the fork button.
   profiles: [
+    { name: 'Copilot', command: `copilot; ${SHELL_TAIL}` },
     { name: 'Claude', command: `claude; ${SHELL_TAIL}`,
       resume: `claude --resume {session}; ${SHELL_TAIL}`,
       fork: `claude --resume {session} --fork-session; ${SHELL_TAIL}` },
-    { name: 'Copilot', command: `copilot; ${SHELL_TAIL}` },
     { name: 'Shell', command: SHELL_TAIL },
   ],
 };
+const CLAUDE_DEFAULTS = DEFAULT_CONFIG.profiles.find((p) => p.name === 'Claude');
 
 function readJson(p) {
   try { return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8').trimStart() /* also drops a UTF-8 BOM */) : null; }
@@ -60,9 +62,25 @@ if (!config) {
   for (const k of ['gpu', 'cursorBlink']) if (!(k in config)) { config[k] = DEFAULT_CONFIG[k]; changed = true; }
   for (const p of config.profiles || []) {
     if (/^\s*claude(\s|;|$)/.test(p.command || '') && !p.fork) {
-      p.resume = DEFAULT_CONFIG.profiles[0].resume;
-      p.fork = DEFAULT_CONFIG.profiles[0].fork;
+      p.resume = CLAUDE_DEFAULTS.resume;
+      p.fork = CLAUDE_DEFAULTS.fork;
       changed = true;
+    }
+  }
+  // v2: Copilot is the first and default profile (also for groups that still had the old default, Claude)
+  if (!(config.configVersion >= 2)) {
+    const isCopilot = (p) => /(^|[\s;&|(])copilot(\s|;|$)/.test(p.command || '');
+    const list = Array.isArray(config.profiles) ? config.profiles : [];
+    if (!list.some(isCopilot)) list.push({ ...DEFAULT_CONFIG.profiles[0] });
+    config.profiles = [...list.filter(isCopilot), ...list.filter((p) => !isCopilot(p))];
+    const oldDefault = config.defaultProfile;
+    config.defaultProfile = config.profiles[0].name;
+    config.configVersion = 2;
+    changed = true;
+    const state = readJson(STATE_PATH);
+    if (state && Array.isArray(state.groups)) {
+      for (const g of state.groups) if (!g.defaultProfile || g.defaultProfile === oldDefault) g.defaultProfile = config.defaultProfile;
+      writeAtomic(STATE_PATH, JSON.stringify(state));
     }
   }
   if (changed) writeAtomic(CONFIG_PATH, JSON.stringify(config, null, 2));
@@ -152,6 +170,7 @@ function withHooks(command) {
 
 let win = null;
 let quitting = false;
+const notes = new Set(); // shown desktop notifications
 const ptys = new Map();
 let pending = {};
 let flushTimer = null;
@@ -274,10 +293,14 @@ function handle(m) {
     case 'flash': if (win && !win.isFocused()) win.flashFrame(true); break;
     case 'notify':
       // desktop notification when the window isn't focused; clicking it opens the pane
+      if (process.env.AGENTMUX_DEBUG) console.log('[notify]', { focused: win && win.isFocused(), supported: Notification.isSupported(), title: m.title });
       if (win && !win.isFocused() && Notification.isSupported()) {
         const n = new Notification({ title: String(m.title || 'AgentMux'), body: String(m.body || ''), urgency: 'critical' });
         n.on('click', () => showPane(m.id));
         n.show();
+        notes.add(n); // keep a reference, or the click handler can be garbage-collected
+        n.on('close', () => notes.delete(n));
+        if (notes.size > 20) notes.delete(notes.values().next().value);
       }
       if (win && !win.isFocused()) win.flashFrame(true);
       break;
