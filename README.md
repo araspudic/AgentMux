@@ -4,6 +4,47 @@ A small tmux-style terminal multiplexer for Linux (Ubuntu), made for running sev
 GitHub Copilot CLI / Claude Code sessions side by side. Copilot is the default profile and runs as
 `copilot --yolo` (auto mode: no confirmation for every command).
 
+## What it is
+
+When you work with AI coding agents you end up with many terminals: an agent per project or task, a dev server,
+logs, a shell to try things. AgentMux keeps them in one window:
+
+- one **group** per project (its own working folder and default agent), listed in the sidebar;
+- inside a group, terminals in **split layouts**, plus **fullscreen views** for the ones you want to see alone;
+- the sidebar shows **what every agent is doing**: working, waiting for your answer, or finished. You see at a
+  glance which session needs you, get a notification when one asks something, and jump to it with one key;
+- everything (groups, layouts, names, fonts) is saved and comes back after a restart, and Claude sessions resume
+  their conversation.
+
+It's a desktop app (Electron) with real terminals, so any CLI works in it: `copilot`, `claude`, `htop`, `vim`, ssh,
+dev servers, etc.
+
+## Screenshots
+
+A group with three terminals in its main split (dev server, `htop`, a shell). The sidebar lists every group and
+terminal; the focused pane has the blue header and frame.
+
+![Main split of a group](docs/screenshots/overview.png)
+
+The same group's fullscreen view 2, split into two panes on its own: the main split above stays untouched.
+In the sidebar the panes of this view are bracketed `┌ └` and marked `⊞`; `notes` is a lone fullscreen pane (`□`).
+The toolbar's `view 1 2 3` switches between them.
+
+![A fullscreen view split into two panes](docs/screenshots/fullscreen-view.png)
+
+New group: name, working folder, the agent its terminals start with, and the starting layout.
+
+![New group dialog](docs/screenshots/new-group.png)
+
+Keyboard shortcuts (`keys` at the bottom of the sidebar).
+
+![Keys](docs/screenshots/keys.png)
+
+The screenshots were taken on an Ubuntu 24.04 VM with plain shell terminals, so they don't show the agent status
+(spinner / `!` / `✓`), the "needs your answer" notifications or fork.
+
+## Features
+
 - **Groups** in the left sidebar (one per project/folder), each with its own terminals.
 - **Split layouts** per group: presets (`1`, `1|1`, `1|1|1`, `1|2`, `2|1`, `1|3`, `2x2`, `1/1`) or custom
   splits (split right / down on any pane, drag the dividers).
