@@ -13,6 +13,10 @@
     <div id="side-foot">
       <button id="btn-config" title="Edit profiles / font / gpu (restart to apply)">config</button>
       <button id="btn-help" title="Keyboard shortcuts">keys</button>
+      <div class="fs-row">
+      <span class="fs" title="Font size of the sidebar, toolbar and pane headers"><span class="fs-l">ui</span><button id="ui-fs-dn">-</button><span id="ui-fs">15</span><button id="ui-fs-up">+</button></span>
+      <span class="fs" title="Font size of the terminals (Ctrl+Shift+ = / - / 0)"><span class="fs-l">term</span><button id="tm-fs-dn">-</button><span id="tm-fs">15</span><button id="tm-fs-up">+</button></span>
+      </div>
     </div>
   </aside>
 
@@ -20,13 +24,14 @@
     <div id="toolbar">
       <span id="tb-title"></span>
       <span id="tb-cwd"></span>
+      <span id="tb-views" class="hidden"></span>
       <span class="spacer"></span>
       <span class="tb-label">layout</span>
       <span id="tb-layouts"></span>
       <span class="sep">│</span>
       <span id="tb-add"></span>
       <span class="sep">│</span>
-      <button id="tb-fork" title="Fork the focused Claude session into a new pane (Ctrl+Shift+F)">fork</button>
+      <button id="tb-fork" title="Fork the focused session (Ctrl+Shift+F): Claude = new pane, Copilot = /fork in the pane">fork</button>
     </div>
     <div id="views">
       <div id="welcome">
@@ -69,12 +74,13 @@
         <tr><td>Ctrl+Shift+T</td><td>new terminal (group's profile)</td></tr>
         <tr><td>Ctrl+Shift+D / E</td><td>split pane right / down</td></tr>
         <tr><td>Ctrl+Shift+Arrows</td><td>move focus between panes</td></tr>
-        <tr><td>Ctrl+Shift+Z</td><td>fullscreen pane on/off</td></tr>
-        <tr><td>Ctrl+Shift+F</td><td>fork the focused Claude session</td></tr>
+        <tr><td>Ctrl+Shift+Z</td><td>fullscreen on/off: moves the pane into a view of its own (split it there freely) / back into the main split</td></tr>
+        <tr><td>Ctrl+Shift+[ / ]</td><td>previous / next view of the group (main split, fullscreen views)</td></tr>
+        <tr><td>Ctrl+Shift+F</td><td>fork the focused session (Copilot: /fork NAME in the pane; Claude: new pane)</td></tr>
         <tr><td>Ctrl+Shift+J</td><td>jump to the next pane that needs an answer</td></tr>
         <tr><td>Ctrl+Shift+R / W</td><td>restart / close pane</td></tr>
         <tr><td>Ctrl+Shift+B</td><td>toggle sidebar</td></tr>
-        <tr><td>Ctrl+Shift+ = / - / 0</td><td>font bigger / smaller / reset</td></tr>
+        <tr><td>Ctrl+Shift+ = / - / 0</td><td>terminal font bigger / smaller / reset (UI font: "ui - +" at the bottom of the sidebar)</td></tr>
         <tr><td>Ctrl+C with selection</td><td>copy</td></tr>
         <tr><td>Ctrl+V, Ctrl+Shift+V</td><td>paste</td></tr>
         <tr><td>right-click</td><td>copy selection, or paste</td></tr>

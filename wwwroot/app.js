@@ -86,7 +86,7 @@ function sanitize(n) {
     const p = { t: 'pane', id: String(n.id || uid()), profile: String(n.profile || '') };
     if (n.name) p.name = String(n.name);
     if (n.session) p.session = String(n.session);
-    if (n.full) p.full = true; // old per-pane fullscreen flag; migrated to g.solo in init()
+    if (n.full) p.full = true; // old per-pane fullscreen flag; migrated to a child view in init()
     return p;
   }
   if (n.t === 'split' && Array.isArray(n.kids)) {
@@ -100,7 +100,8 @@ function sanitize(n) {
 // ======================================================================= state
 let config = { profiles: [] };
 let profiles = [];
-let fontSize = 13;
+let fontSize = 15;
+let uiFontSize = 15;
 let homeDir = '';
 let useGpu = false;
 let groups = [];               // persisted model (+ .view element)
@@ -111,11 +112,15 @@ const groupById = (id) => groups.find((g) => g.id === id);
 const activeGroup = () => groupById(activeGroupId);
 const profileOf = (name) => profiles.find((p) => p.name === name) || profiles[0];
 const defaultProfileFor = (g) => (g && g.defaultProfile) || config.defaultProfile || profiles[0].name;
-// A group = a split layout (g.layout) + fullscreen panes that live outside it (g.solo).
-// g.zoomed = id of the fullscreen pane being shown, or null when the split layout is shown.
-const groupNodes = (g) => [...leaves(g.layout), ...g.solo];
+// A group = a list of views (g.wins), each { id, layout, focus }. View 1 is the main split; a fullscreen pane
+// gets a child view of its own, which can be split again without touching the main split. g.win = shown view id.
+const groupNodes = (g) => g.wins.flatMap((w) => leaves(w.layout));
 const groupPanes = (g) => groupNodes(g).map((n) => panes.get(n.id)).filter(Boolean);
-const isSolo = (g, id) => g.solo.some((n) => n.id === id);
+const winOf = (g, id) => g.wins.find((w) => findParent(w.layout, id));
+const shownWin = (g) => g.wins.find((w) => w.id === g.win) || g.wins[0];
+const isChild = (g, id) => { const w = winOf(g, id); return !!w && w !== g.wins[0]; };
+// the pane a view opens on: the one last focused in it
+const winFocus = (w) => { const ls = leaves(w.layout); return ls.find((n) => n.id === w.focus) || ls[0]; };
 const focusedPane = () => { const g = activeGroup(); return g && panes.get(g.focusedPaneId); };
 
 function agentKind(profileName) {
@@ -129,11 +134,12 @@ function save() {
   send({
     type: 'save',
     state: {
-      version: 2, activeGroupId, fontSize,
+      version: 3, activeGroupId, fontSize, uiFontSize,
       sidebar: !document.body.classList.contains('no-sidebar'),
       groups: groups.map((g) => ({
         id: g.id, name: g.name, cwd: g.cwd, defaultProfile: g.defaultProfile,
-        focusedPaneId: g.focusedPaneId, layout: g.layout, solo: g.solo,
+        focusedPaneId: g.focusedPaneId, win: g.win,
+        wins: g.wins.map((w) => ({ id: w.id, layout: w.layout, focus: w.focus || null })),
       })),
     },
   });
@@ -173,21 +179,33 @@ function init(m) {
   homeDir = m.home || '';
   useGpu = !!m.gpu;
   const st = m.state || {};
-  fontSize = st.fontSize || config.fontSize || 13;
+  fontSize = st.fontSize || config.fontSize || 15;
+  $("#tm-fs").textContent = fontSize;
+  setUiFontSize(st.uiFontSize || config.uiFontSize || 15, false);
   if (st.sidebar === false) document.body.classList.add('no-sidebar');
 
   for (const sg of st.groups || []) {
     const g = {
       id: String(sg.id || uid()), name: String(sg.name || 'group'), cwd: sg.cwd || '',
-      defaultProfile: sg.defaultProfile || '', focusedPaneId: sg.focusedPaneId || null,
-      layout: sanitize(sg.layout), zoomed: null,
-      solo: (Array.isArray(sg.solo) ? sg.solo : []).map(sanitize).filter((n) => n && n.t === 'pane'),
+      defaultProfile: sg.defaultProfile || '', focusedPaneId: sg.focusedPaneId || null, wins: [], win: null,
     };
-    for (const n of leaves(g.layout)) {
-      if (sg.full || n.full) { removeFromLayout(g, n.id); g.solo.push(n); }
+    if (Array.isArray(sg.wins)) {
+      for (const sw of sg.wins) {
+        const layout = sanitize(sw && sw.layout);
+        if (layout) g.wins.push({ id: String(sw.id || uid()), layout, focus: sw.focus || null });
+      }
+    } else { // state v2: one split layout + fullscreen panes (g.solo / old n.full flags) -> main view + child views
+      const main = sanitize(sg.layout);
+      if (main) g.wins.push({ id: uid(), layout: main });
+      for (const n of leaves(main)) if (sg.full || n.full) { detach(g, n.id); g.wins.push({ id: uid(), layout: n }); }
+      for (const n of Array.isArray(sg.solo) ? sg.solo : []) {
+        const s = sanitize(n);
+        if (s && s.t === 'pane') g.wins.push({ id: uid(), layout: s });
+      }
     }
-    for (const n of g.solo) delete n.full;
-    if (isSolo(g, g.focusedPaneId)) g.zoomed = g.focusedPaneId;
+    for (const n of groupNodes(g)) delete n.full;
+    const fw = winOf(g, g.focusedPaneId) || g.wins.find((w) => w.id === sg.win);
+    g.win = fw ? fw.id : null;
     addGroupView(g);
     groups.push(g);
     // restored Claude panes resume their previous conversation (if we know its session id)
@@ -201,9 +219,12 @@ function init(m) {
 
 // ======================================================================= panes
 function paneName(p) { return p.node.name || p.node.profile; }
+// sidebar label: your name for the pane (+ the program's title), or just the title if you haven't named it
 function label(p) {
-  const t = (p.title || '').replace(/^[^\w]+\s*/, '');
-  return p.title && t.toLowerCase() !== paneName(p).toLowerCase() ? `${paneName(p)} — ${p.title}` : paneName(p);
+  const title = (p.title || '').trim();
+  const t = title.replace(/^[^\w]+\s*/, '');
+  if (!p.node.name) return title || p.node.profile;
+  return title && t.toLowerCase() !== p.node.name.toLowerCase() ? `${p.node.name} — ${title}` : p.node.name;
 }
 function newPaneNode(profile) {
   return { t: 'pane', id: uid(), profile: profile || profiles[0].name };
@@ -252,7 +273,7 @@ function createPane(node, g) {
     sideGlyph: null, fitQueued: false, startCmd: null, resumeOnStart: false,
   };
   panes.set(node.id, p);
-  forkBtn.disabled = !profileOf(node.profile).fork;
+  { const pr = profileOf(node.profile); forkBtn.disabled = !(pr.fork || pr.forkInPane); }
 
   name.addEventListener('dblclick', () => renamePane(p.id));
   sel.addEventListener('change', () => {
@@ -261,7 +282,7 @@ function createPane(node, g) {
     }
     node.profile = sel.value;
     p.title = '';
-    forkBtn.disabled = !profileOf(node.profile).fork;
+    { const pr = profileOf(node.profile); forkBtn.disabled = !(pr.fork || pr.forkInPane); }
     restartPane(node.id);
     saveSoon();
   });
@@ -350,11 +371,12 @@ function spawn(p) {
   p.kind = agentKind(p.node.profile);
   p.started = true; p.alive = true; p.hooked = false;
   p.lastOut = 0; p.burstStart = 0; p.workStart = 0;
-  p.answeredQ = null; p.sawBusy = false; p.lastBusy = 0;
+  p.answeredQ = null; p.askSeen = null; p.sawBusy = false; p.lastBusy = 0;
   setAgent(p, 'idle');
   send({ type: 'spawn', id: p.id, command, cwd: (g && g.cwd) || '', cols: p.term.cols, rows: p.term.rows });
   updateGlyphs(p);
   updatePaneHeader(p);
+  updateForkButtons();
 }
 
 function restartPane(id) {
@@ -377,6 +399,7 @@ function onExit(id, code) {
   setAgent(p, 'idle');
   updateGlyphs(p);
   renderSidebarSoon();
+  updateForkButtons();
 }
 
 function copySelection(p) {
@@ -397,17 +420,17 @@ function isWatching(p) {
 
 // Non-hooked agents (Copilot): the bottom of the screen is scanned while output is streaming (TUIs keep
 // redrawing even while they wait for you, so "output went quiet" alone can't tell asking from working).
-//   1. a permission prompt / multiple-choice menu / y-n prompt on screen -> ask   (always wins)
-//   2. a "working" hint ("Esc to cancel", "esc to interrupt") on screen  -> working
-//   3. otherwise output activity: a burst of output -> working; quiet after work -> done
-//      (or ask, if the agent's last words were a question to you: "Would you like me to …?")
-const STRONG_ASK_RE = /(do you want to [^\n]*|allow [^\n]{2,80}\?|approve [^\n]{2,80}\?|\((?:y\/n|yes\/no)\)|\[(?:y\/n|yes\/no)\])/i;
-const SOFT_ASK_RE = /(would you like|do you want|want me to|shall i|should i|which (?:one|option)|please (?:confirm|choose|select|pick))[^\n]*\?/i;
-const MENU_ITEM_RE = /^[\s│┃║|]*(?:[❯›▶►>→●◉]\s*)?(?:\d{1,2}[.)]|\[\d{1,2}\])\s+\S/;
-const MENU_CURSOR_RE = /^[\s│┃║|]*[❯›▶►>→●◉]\s*(?:\d{1,2}[.)]|\[\d{1,2}\])\s+\S/;
-const MENU_HINT_RE = /(↑\s*\/?\s*↓|arrow keys|number keys|enter to (?:select|confirm|submit|choose)|to navigate|confirm with|(?:press|type) (?:a )?number)/i;
+// "Needs your answer" is deliberately strict — only a prompt that blocks the agent until you pick/confirm:
+//   - a selection menu at the bottom of the screen: a cursor line "❯ 1. Yes" + another numbered option,
+//     with a question ("…?") right above it or a key hint ("Enter to select", "↑↓", "Esc to cancel") right below
+//   - a "(y/n)" / "[Y/n]" prompt on the last lines
+// Warnings, numbered lists in answers, "Would you like me to …?" prose etc. never count.
+// Otherwise: a busy hint ("Esc to cancel", "esc to interrupt") or a burst of output = working; quiet after work = done.
+const MENU_ITEM_RE = /^[\s│┃║|]*(?:[❯›>]\s*)?\d{1,2}[.)]\s+\S/;
+const MENU_CURSOR_RE = /^[\s│┃║|]*[❯›>]\s*\d{1,2}[.)]\s+\S/;
+const MENU_HINT_RE = /(↑\s*\/?\s*↓|arrow keys|number keys|enter to (?:select|confirm|submit|choose)|to (?:select|navigate|confirm)\b|confirm with|esc to (?:cancel|skip|dismiss|deny|reject))/i;
+const YN_RE = /(\((?:y\/n|yes\/no)\)|\[(?:y\/n|yes\/no)\])\s*:?\s*$/i;
 const BUSY_RE = /\b(?:esc|escape|ctrl\+c)\s+to\s+(?:cancel|interrupt|stop)\b/i;
-const PROMPT_LINE_RE = /^[\s│┃║|]*[>❯$#]\s/; // your own input / echoed prompt lines
 const cleanLine = (s) => s.replace(/[│┃║╭╮╰╯─━┌┐└┘]/g, ' ').replace(/\s+/g, ' ').trim();
 
 function onOutput(p, data) {
@@ -429,62 +452,61 @@ function scheduleScan(p, ms) {
   p.scanT = setTimeout(() => { p.scanT = 0; scanScreen(p); }, ms);
 }
 
-// the last ~25 non-empty rows of the visible screen (not the scrollback)
-function screenTail(p, n = 25) {
+// the non-empty rows at the bottom of the visible screen (not the scrollback), last one last
+function screenTail(p, n) {
   const b = p.term.buffer.active;
-  const text = (i) => { const l = b.getLine(i); return l ? l.translateToString(true) : ''; };
-  let last = b.baseY + p.term.rows - 1;
-  while (last > b.baseY && !text(last).trim()) last--;
   const out = [];
-  for (let i = Math.max(b.baseY, last - n + 1); i <= last; i++) out.push(text(i));
+  for (let i = b.baseY + p.term.rows - 1; i >= b.baseY && out.length < n; i--) {
+    const l = b.getLine(i);
+    const t = l ? l.translateToString(true) : '';
+    if (cleanLine(t)) out.unshift(t);
+  }
   return out;
 }
 
-// a prompt that blocks the agent until you answer -> its question text, else null
-function strongQuestion(lines) {
-  const items = [];
-  lines.forEach((l, i) => { if (MENU_ITEM_RE.test(l) && !PROMPT_LINE_RE.test(l.replace(/^[\s│┃║|]*[❯›▶►→●◉]/, ''))) items.push(i); });
-  const text = lines.join('\n');
-  const menu = items.length >= 2 && (items.some((i) => MENU_CURSOR_RE.test(lines[i])) || MENU_HINT_RE.test(text));
-  const m = text.match(STRONG_ASK_RE);
-  if (!menu && !m) return null;
-  if (menu) {
-    // the question is normally just above the options
-    for (let i = items[0] - 1; i >= Math.max(0, items[0] - 8); i--) {
-      const t = cleanLine(lines[i]);
-      if (t.endsWith('?')) return t.slice(0, 140);
-    }
-  }
-  return m ? cleanLine(m[0]).slice(0, 140) : 'waiting for your choice';
-}
-
-// the agent's last words were a question to you
-function softQuestion(lines) {
-  const tail = lines.filter((l) => cleanLine(l)).slice(-8);
-  for (let i = tail.length - 1; i >= 0; i--) {
-    if (PROMPT_LINE_RE.test(tail[i])) continue;
-    const m = cleanLine(tail[i]).match(SOFT_ASK_RE);
-    if (m) return cleanLine(tail[i]).slice(0, 140);
-  }
-  return null;
+// a blocking prompt at the bottom of the screen -> its question text, else null
+function pendingQuestion(lines) {
+  const last = lines.slice(-3);
+  const yn = last.find((l) => YN_RE.test(cleanLine(l)));
+  if (yn) return cleanLine(yn).slice(0, 140);
+  const zone = lines.slice(-14); // a menu has to be at the bottom, not somewhere up in the transcript
+  const cur = zone.findIndex((l) => MENU_CURSOR_RE.test(l));
+  if (cur < 0) return null;
+  let first = cur, end = cur; // the block of numbered options around the cursor line
+  while (first > 0 && MENU_ITEM_RE.test(zone[first - 1])) first--;
+  while (end < zone.length - 1 && MENU_ITEM_RE.test(zone[end + 1])) end++;
+  if (end - first < 1) return null;
+  if (zone.length - 1 - end > 4) return null; // the menu must be the last thing on screen (± a hint/footer)
+  const above = zone.slice(Math.max(0, first - 3), first).map(cleanLine);
+  const below = zone.slice(end + 1, end + 4).map(cleanLine);
+  const q = [...above].reverse().find((t) => t.endsWith('?'));
+  if (!q && !below.some((t) => MENU_HINT_RE.test(t))) return null;
+  return (q || 'waiting for your choice').slice(0, 140);
 }
 
 function scanScreen(p) {
   if (!p.kind || p.hooked || !p.alive) return;
   const now = Date.now();
-  const lines = screenTail(p);
-  const q = strongQuestion(lines);
-  // a question you've just answered stays ignored until it has left the screen
+  const lines = screenTail(p, 30);
+  const q = pendingQuestion(lines);
+  // a question you've answered / dismissed stays ignored until it has left the screen
   if (p.answeredQ && q !== p.answeredQ) p.answeredQ = null;
-  if (q && q !== p.answeredQ) { setAgent(p, 'ask', q); return; }
+  if (q && q !== p.answeredQ) {
+    // must still be there a moment later (not a half-drawn frame)
+    if (p.agent === 'ask' || (p.askSeen === q && now - p.askSeenAt >= 500)) { setAgent(p, 'ask', q); return; }
+    if (p.askSeen !== q) { p.askSeen = q; p.askSeenAt = now; }
+    scheduleScan(p, 600);
+    return;
+  }
+  p.askSeen = null;
   const quiet = now - p.lastOut >= 1400;
-  if (BUSY_RE.test(lines.join('\n'))) {
+  if (BUSY_RE.test(lines.slice(-12).join('\n'))) {
     p.sawBusy = true;
     p.lastBusy = now;
     if (p.agent !== 'working') startWorking(p, now);
     return;
   }
-  if (p.agent === 'ask') { // question gone without us seeing the answer key (e.g. answered by mouse)
+  if (p.agent === 'ask') { // the question went away (answered with the mouse, cancelled, …)
     if (quiet) setAgent(p, 'idle'); else startWorking(p, now);
     return;
   }
@@ -492,9 +514,7 @@ function scanScreen(p) {
     // finished? with a known busy hint: the hint is gone; otherwise: output stopped
     const finished = p.sawBusy ? now - p.lastBusy > 1200 && now - p.lastInput > 2500 : quiet;
     if (!finished) { if (p.sawBusy) scheduleScan(p, 1300); return; }
-    const soft = now - p.workStart > 2000 && softQuestion(lines);
-    if (soft) setAgent(p, 'ask', soft);
-    else setAgent(p, now - p.workStart > 2500 ? 'done' : 'idle');
+    setAgent(p, now - p.workStart > 2500 ? 'done' : 'idle');
     return;
   }
   // idle / done: a sustained burst of output means the agent started working
@@ -551,8 +571,7 @@ function setAgent(p, state, msg) {
     if (prev === 'ask') { updateToast(p); }
     else if (!isWatching(p)) {
       showToast(p);
-      const g = groupById(p.groupId);
-      send({ type: 'notify', id: p.id, title: `${g ? g.name : ''} › ${paneName(p)} needs your input`, body: msg });
+      send({ type: 'notify', id: p.id, title: `! ${whereOf(p)}`, body: 'needs your answer — click to open' });
     }
   } else {
     removeToast(p.id);
@@ -600,22 +619,27 @@ setInterval(() => {
 // ---------------------------------------------------------------- toasts (bottom right)
 const toasts = new Map();
 
+// "group › pane/session name" of a pane, for toasts and notifications
+function whereOf(p) {
+  const g = groupById(p.groupId);
+  return `${g ? g.name : ''} › ${label(p)}`;
+}
+
 function showToast(p) {
   removeToast(p.id);
-  const g = groupById(p.groupId);
   const el = h('div', { class: 'toast', title: 'Click to open this pane', onclick: () => openPane(p.id) },
     h('span', { class: 't-mark', text: '!' }),
     h('div', { class: 't-body' },
-      h('div', { class: 't-where', text: `${g ? g.name : ''} › ${paneName(p)}` }),
-      h('div', { class: 't-msg', text: p.askMsg || 'needs your input' })),
+      h('div', { class: 't-where', text: whereOf(p) }),
+      h('div', { class: 't-msg', text: 'needs your answer' })),
     h('button', { class: 't-close', text: 'x', title: 'Dismiss', onclick: (e) => { e.stopPropagation(); removeToast(p.id); } }));
   $('#toasts').append(el);
   toasts.set(p.id, el);
 }
 function updateToast(p) {
   const el = toasts.get(p.id);
-  const msg = el && el.querySelector('.t-msg');
-  if (msg) msg.textContent = p.askMsg || 'needs your input';
+  const where = el && el.querySelector('.t-where');
+  if (where) where.textContent = whereOf(p);
 }
 function removeToast(id) {
   const el = toasts.get(id);
@@ -645,88 +669,93 @@ function setFocused(p) {
   if (!g) return;
   const changed = g.focusedPaneId !== p.id;
   g.focusedPaneId = p.id;
-  if (!isSolo(g, p.id)) g.lastTiledId = p.id;
+  const w = winOf(g, p.id);
+  if (w) w.focus = p.id;
   removeToast(p.id);
   for (const q of groupPanes(g)) q.el.classList.toggle('focused', q === p);
   if (changed) { renderSidebar(); saveSoon(); updateForkButtons(); }
 }
 
-// "Open" a pane: a fullscreen pane is shown alone, a split pane shows the split layout.
+// "Open" a pane: shows the view it's in (the main split or its own child view) and focuses it.
 function focusPane(id) {
   const p = panes.get(id);
   if (!p) return;
   const g = groupById(p.groupId);
-  const want = isSolo(g, p.id) ? p.id : null;
-  if (g.zoomed !== want) { g.zoomed = want; renderLayout(g); }
+  const w = winOf(g, p.id);
+  if (w && g.win !== w.id) { g.win = w.id; renderLayout(g); }
   setFocused(p);
   if (p.opened) p.term.focus(); else p.focusOnOpen = true;
 }
 
-function removeFromLayout(g, id) {
-  const r = findParent(g.layout, id);
-  if (!r) return;
-  if (!r.parent) g.layout = null;
+function showWin(g, w) {
+  const n = w && winFocus(w);
+  if (n) focusPane(n.id);
+}
+
+// take a pane out of its view; a view that ends up empty is dropped. Returns the view.
+function detach(g, id) {
+  const w = winOf(g, id);
+  if (!w) return null;
+  const r = findParent(w.layout, id);
+  if (!r.parent) w.layout = null;
   else {
     const i = r.parent.kids.indexOf(r.node);
     r.parent.kids.splice(i, 1);
     r.parent.sizes.splice(i, 1);
   }
-  g.layout = normalize(g.layout);
+  w.layout = normalize(w.layout);
+  if (w.focus === id) w.focus = null;
+  if (!w.layout) {
+    g.wins = g.wins.filter((x) => x !== w);
+    if (g.win === w.id) g.win = null;
+  }
+  return w;
 }
 
-function autoDir(g, target) {
+function autoDir(layout, target) {
   if (target.el.isConnected) {
     const r = target.el.getBoundingClientRect();
     if (r.width > 0) return r.width > r.height * 1.6 ? 'row' : 'col';
   }
-  const r = findParent(g.layout, target.id);
+  const r = findParent(layout, target.id);
   return r && r.parent && r.parent.dir === 'row' ? 'col' : 'row';
 }
 
-// put a node into the split layout, next to nearId (or the last used split pane)
-function insertIntoLayout(g, node, nearId) {
-  if (!g.layout) { g.layout = node; return; }
-  const ids = leaves(g.layout).map((n) => n.id);
-  if (!ids.includes(nearId)) nearId = ids.includes(g.lastTiledId) ? g.lastTiledId : ids[ids.length - 1];
-  const near = panes.get(nearId);
-  const dir = autoDir(g, near);
-  const { parent } = findParent(g.layout, nearId);
+// put `node` next to pane `id` of view w, splitting in direction dir
+function splitAt(w, id, node, dir) {
+  const { node: near, parent } = findParent(w.layout, id);
   if (parent && parent.dir === dir) {
-    const i = parent.kids.indexOf(near.node);
+    const i = parent.kids.indexOf(near);
     const s = parent.sizes[i] / 2;
     parent.sizes[i] = s;
     parent.kids.splice(i + 1, 0, node);
     parent.sizes.splice(i + 1, 0, s);
   } else {
-    const split = { t: 'split', dir, sizes: [1, 1], kids: [near.node, node] };
-    if (!parent) g.layout = split;
-    else parent.kids[parent.kids.indexOf(near.node)] = split;
+    const split = { t: 'split', dir, sizes: [1, 1], kids: [near, node] };
+    if (!parent) w.layout = split;
+    else parent.kids[parent.kids.indexOf(near)] = split;
   }
 }
 
-// Explicit split (│ / ─ / Ctrl+Shift+D/E). Splitting a fullscreen pane moves it into the split layout first.
+// put a node into view w, next to nearId (or the pane last focused in that view)
+function insertIntoWin(w, node, nearId) {
+  if (!w.layout) { w.layout = node; return; }
+  const ids = leaves(w.layout).map((n) => n.id);
+  if (!ids.includes(nearId)) nearId = ids.includes(w.focus) ? w.focus : ids[ids.length - 1];
+  splitAt(w, nearId, node, autoDir(w.layout, panes.get(nearId)));
+}
+
+// Explicit split (│ / ─ / Ctrl+Shift+D/E): stays inside the pane's own view, so splitting a fullscreen
+// pane splits its child view and leaves the main split alone.
 function splitPane(id, dir, profile) {
   const p = panes.get(id);
   if (!p) return;
   const g = groupById(p.groupId);
-  if (isSolo(g, id)) {
-    g.solo = g.solo.filter((n) => n.id !== id);
-    insertIntoLayout(g, p.node);
-  }
+  const w = winOf(g, id);
   const node = newPaneNode(profile || p.node.profile);
-  const { parent } = findParent(g.layout, id);
-  if (parent && parent.dir === dir) {
-    const i = parent.kids.indexOf(p.node);
-    const s = parent.sizes[i] / 2;
-    parent.sizes[i] = s;
-    parent.kids.splice(i + 1, 0, node);
-    parent.sizes.splice(i + 1, 0, s);
-  } else {
-    const split = { t: 'split', dir, sizes: [1, 1], kids: [p.node, node] };
-    if (!parent) g.layout = split;
-    else parent.kids[parent.kids.indexOf(p.node)] = split;
-  }
-  g.zoomed = null;
+  splitAt(w, id, node, dir);
+  g.win = w.id;
+  w.focus = node.id;
   createPane(node, g).focusOnOpen = true;
   g.focusedPaneId = node.id;
   renderLayout(g);
@@ -734,14 +763,17 @@ function splitPane(id, dir, profile) {
   saveSoon();
 }
 
-// New pane next to `near` (default: focused pane): while looking at a fullscreen pane it becomes another
-// fullscreen pane; while looking at the split layout it joins the split.
+// New pane next to `near` (default: focused pane): while looking at a lone fullscreen pane it gets a child
+// view of its own; otherwise it joins the view you're looking at (main split or a split child view).
 function placeNewPane(g, node, near) {
-  if (g.zoomed) {
-    g.solo.push(node);
-    g.zoomed = node.id;
+  const w = shownWin(g);
+  if (!w || (w !== g.wins[0] && leaves(w.layout).length === 1)) {
+    const nw = { id: uid(), layout: node };
+    g.wins.splice(w ? g.wins.indexOf(w) + 1 : g.wins.length, 0, nw);
+    g.win = nw.id;
   } else {
-    insertIntoLayout(g, node, near && !isSolo(g, near.id) ? near.id : null);
+    insertIntoWin(w, node, near && winOf(g, near.id) === w ? near.id : null);
+    g.win = w.id;
   }
   const np = createPane(node, g);
   np.focusOnOpen = true;
@@ -762,8 +794,27 @@ async function forkPane(id) {
   const p = panes.get(id || (focusedPane() || {}).id);
   if (!p) return;
   const prof = profileOf(p.node.profile);
+  if (prof.forkInPane) { // Copilot: "/fork NAME" inside the session — the pane continues as the new fork
+    if (!p.alive) { alert('Start this pane first, then fork it.'); return; }
+    const name = await askText({
+      title: 'fork session',
+      info: `from: ${label(p)}\nRuns ${prof.forkInPane.replace(/\{name\}/g, '<name>')} in this pane: it continues as the new\nfork, the original session stays saved (reopen it with /resume).`,
+      label: 'name of the new fork',
+      value: `${paneName(p)}-fork`,
+    });
+    if (!name) return;
+    const cmd = prof.forkInPane.replace(/\{name\}/g, name.replace(/[\r\n]/g, ' '));
+    send({ type: 'input', id: p.id, data: cmd });
+    setTimeout(() => send({ type: 'input', id: p.id, data: '\r' }), 400); // after the slash-command popup settles
+    p.node.name = name;
+    updatePaneHeader(p);
+    renderSidebar();
+    saveSoon();
+    focusPane(p.id);
+    return;
+  }
   if (!prof.fork) {
-    alert(`"${prof.name}" panes can't be forked: its profile has no "fork" command.\n(Forking works for Claude sessions.)`);
+    alert(`"${prof.name}" panes can't be forked: its profile has no "fork" or "forkInPane" command.`);
     return;
   }
   if (!p.node.session) {
@@ -786,9 +837,10 @@ async function forkPane(id) {
 
 function updateForkButtons() {
   const fp = focusedPane();
-  const can = (p) => !!(p && profileOf(p.node.profile).fork && p.node.session);
+  const forkable = (p) => { const pr = profileOf(p.node.profile); return !!(pr.forkInPane || pr.fork); };
+  const can = (p) => !!(p && (profileOf(p.node.profile).forkInPane ? p.alive : profileOf(p.node.profile).fork && p.node.session));
   $('#tb-fork').disabled = !can(fp);
-  for (const p of panes.values()) p.forkBtn.disabled = !profileOf(p.node.profile).fork;
+  for (const p of panes.values()) p.forkBtn.disabled = !forkable(p);
 }
 
 async function renamePane(id) {
@@ -808,11 +860,9 @@ function closePane(id, ask = true) {
   const g = groupById(p.groupId);
   if (ask && p.alive && !confirm(`Close "${label(p)}"?\nThe running process will be killed.`)) return;
   destroyPane(p);
-  removeFromLayout(g, id);
-  g.solo = g.solo.filter((n) => n.id !== id);
-  if (g.zoomed === id) g.zoomed = null;
-  if (g.focusedPaneId === id) {
-    const next = leaves(g.layout).find((n) => n.id === g.lastTiledId) || leaves(g.layout)[0] || g.solo[0];
+  const w = detach(g, id);
+  if (g.focusedPaneId === id) { // next: another pane of the same view, else the main split
+    const next = (w && w.layout && winFocus(w)) || (g.wins[0] && winFocus(g.wins[0]));
     g.focusedPaneId = next ? next.id : null;
   }
   renderLayout(g);
@@ -833,25 +883,32 @@ function destroyPane(p) {
   panes.delete(p.id);
 }
 
+// Fullscreen on/off (□ / ■, Ctrl+Shift+Z):
+//   pane of the main split -> moved into a child view of its own (split it there as much as you like);
+//   pane of a child view   -> put back into the main split (the child view's other panes stay where they are).
 function toggleZoom(id) {
   const p = panes.get(id || (focusedPane() || {}).id);
   if (!p) return;
   const g = groupById(p.groupId);
-  if (isSolo(g, p.id)) {
-    g.solo = g.solo.filter((n) => n.id !== p.id);
-    insertIntoLayout(g, p.node);
-  } else {
-    removeFromLayout(g, p.id);
-    g.solo.push(p.node);
-  }
+  const w = winOf(g, p.id);
+  if (w !== g.wins[0]) {
+    detach(g, p.id);
+    insertIntoWin(g.wins[0], p.node);
+  } else if (leaves(w.layout).length > 1) {
+    detach(g, p.id);
+    g.wins.push({ id: uid(), layout: p.node });
+  } else return; // the only pane of the main split
   focusPane(p.id);
   renderLayout(g);
   renderSidebar();
   saveSoon();
 }
 
+// presets arrange the view you're looking at (main split or a child view)
 function applyPreset(g, preset, profile) {
-  const existing = leaves(g.layout);
+  let w = shownWin(g);
+  if (!w) { w = { id: uid(), layout: null }; g.wins.push(w); }
+  const existing = leaves(w.layout);
   let i = 0;
   const created = [];
   const slot = () => {
@@ -867,25 +924,21 @@ function applyPreset(g, preset, profile) {
     const last = ls[ls.length - 1];
     tree = replaceIn(tree, last, C(last, ...extra));
   }
-  g.layout = normalize(tree);
-  g.zoomed = null;
+  w.layout = normalize(tree);
+  g.win = w.id;
   for (const n of created) createPane(n, g);
-  if (!g.focusedPaneId || !panes.has(g.focusedPaneId) || isSolo(g, g.focusedPaneId)) g.focusedPaneId = leaves(g.layout)[0].id;
+  if (!g.focusedPaneId || !panes.has(g.focusedPaneId) || winOf(g, g.focusedPaneId) !== w) g.focusedPaneId = winFocus(w).id;
   renderLayout(g);
   renderSidebar();
   saveSoon();
 }
 
+// Ctrl+Shift+Arrows: the nearest pane in that direction inside the shown view; at the edge, the previous /
+// next view of the group.
 function moveFocus(dir) {
   const cur = focusedPane();
   const g = activeGroup();
   if (!cur || !g) return;
-  const cycle = () => {
-    const ps = groupPanes(g);
-    const i = ps.indexOf(cur) + (dir === 'left' || dir === 'up' ? -1 : 1);
-    focusPane(ps[(i + ps.length) % ps.length].id);
-  };
-  if (g.zoomed) { cycle(); return; }
   const a = cur.el.getBoundingClientRect();
   const acx = (a.left + a.right) / 2, acy = (a.top + a.bottom) / 2;
   let best = null, bestScore = Infinity;
@@ -901,15 +954,33 @@ function moveFocus(dir) {
     const score = primary * 2 + secondary;
     if (score < bestScore) { bestScore = score; best = p; }
   }
-  if (best) focusPane(best.id);
-  else if (g.solo.length) cycle();
+  if (best) { focusPane(best.id); return; }
+  const n = g.wins.length;
+  if (n > 1) {
+    const i = g.wins.indexOf(winOf(g, cur.id)) + (dir === 'left' || dir === 'up' ? -1 : 1);
+    showWin(g, g.wins[(i + n) % n]);
+  }
 }
 
 function setFontSize(n) {
   fontSize = Math.max(8, Math.min(32, n));
   for (const p of panes.values()) { p.term.options.fontSize = fontSize; fitPane(p); }
+  $('#tm-fs').textContent = fontSize;
   saveSoon();
 }
+
+// font size of everything that isn't a terminal (sidebar, toolbar, pane headers, toasts, dialogs)
+function setUiFontSize(n, persist = true) {
+  uiFontSize = Math.max(9, Math.min(28, n));
+  document.documentElement.style.setProperty('--ui-fs', uiFontSize + 'px');
+  $('#ui-fs').textContent = uiFontSize;
+  if (persist) { queueRefresh(); saveSoon(); } // pane headers changed height -> refit the terminals
+}
+$('#ui-fs-dn').addEventListener('click', () => setUiFontSize(uiFontSize - 1));
+$('#ui-fs-up').addEventListener('click', () => setUiFontSize(uiFontSize + 1));
+$('#tm-fs-dn').addEventListener('click', () => setFontSize(fontSize - 1));
+$('#tm-fs-up').addEventListener('click', () => setFontSize(fontSize + 1));
+for (const id of ['ui-fs-dn', 'ui-fs-up', 'tm-fs-dn', 'tm-fs-up']) $('#' + id).addEventListener('mousedown', (e) => e.preventDefault());
 
 // ======================================================================= rendering
 function addGroupView(g) {
@@ -927,22 +998,30 @@ function updatePaneHeader(p) {
 function renderLayout(g) {
   const view = g.view;
   view.replaceChildren();
-  for (const p of groupPanes(g)) {
-    const solo = isSolo(g, p.id);
-    p.el.classList.toggle('focused', p.id === g.focusedPaneId);
-    p.zoomBtn.classList.toggle('on', solo);
-    p.zoomBtn.textContent = solo ? '■' : '□';
-    p.zoomBtn.title = solo ? 'Exit fullscreen — put back into the split layout (Ctrl+Shift+Z)'
-                           : 'Fullscreen — take this pane out of the split (Ctrl+Shift+Z)';
+  for (const w of g.wins) {
+    const ls = leaves(w.layout);
+    const child = w !== g.wins[0];
+    for (const n of ls) {
+      const p = panes.get(n.id);
+      if (!p) continue;
+      p.el.classList.toggle('focused', p.id === g.focusedPaneId);
+      p.zoomBtn.classList.toggle('on', child);
+      p.zoomBtn.textContent = child ? '■' : '□';
+      p.zoomBtn.disabled = !child && ls.length < 2;
+      p.zoomBtn.title = child
+        ? 'Exit fullscreen — put this pane back into the main split (Ctrl+Shift+Z)'
+        : ls.length < 2 ? 'Only pane of the main split'
+        : 'Fullscreen — move this pane out of the main split into a view of its own,\nwhere you can split it again without touching the main split (Ctrl+Shift+Z)';
+    }
   }
-  const zp = g.zoomed && panes.get(g.zoomed);
-  if (!zp && !g.layout) {
-    view.append(h('div', { class: 'empty', text: g.solo.length
-      ? 'all terminals in this group are fullscreen — pick one in the sidebar'
-      : 'no terminals — add one from the toolbar (Ctrl+Shift+T)' }));
+  const w = shownWin(g);
+  g.win = w ? w.id : null;
+  if (g.id === activeGroupId) updateViewTabs();
+  if (!w) {
+    view.append(h('div', { class: 'empty', text: 'no terminals — add one from the toolbar (Ctrl+Shift+T)' }));
     return;
   }
-  const root = zp ? zp.el : build(g.layout);
+  const root = build(w.layout);
   root.style.flex = '1 1 0px';
   view.append(root);
   queueRefresh();
@@ -1049,18 +1128,26 @@ function renderSidebar() {
       h('button', { class: 'g-btn', title: 'Close group', text: 'x', onclick: (e) => { e.stopPropagation(); closeGroup(g); } }));
     const box = h('div', { class: 'group' }, head);
     if (g.cwd) box.append(h('div', { class: 'g-cwd', title: g.cwd, text: shortPath(g.cwd) }));
-    for (const p of ps) {
-      p.sideGlyph = h('span', { class: 'glyph' });
-      updateGlyphs(p);
-      box.append(h('div', {
-        class: 's-item' + (active && g.focusedPaneId === p.id ? ' focused' : '') +
-          (p.kind && p.agent === 'ask' ? ' st-ask' : '') + (p.kind && p.agent === 'done' ? ' st-done' : ''),
-        title: label(p) + (p.agent === 'ask' && p.askMsg ? `\n! ${p.askMsg}` : '') + '\nDouble-click to rename',
-        onclick: () => openPane(p.id),
-        ondblclick: () => renamePane(p.id),
-      }, p.sideGlyph, h('span', { class: 's-label', text: label(p) }),
-        isSolo(g, p.id) ? h('span', { class: 's-full', text: '□', title: 'Fullscreen pane' }) : null));
-    }
+    // main split panes first; then each child view: a lone fullscreen pane gets □, a split child view's panes
+    // are bracketed ┌ │ └ so you can see they belong together
+    g.wins.forEach((w, wi) => {
+      const wps = leaves(w.layout).map((n) => panes.get(n.id)).filter(Boolean);
+      wps.forEach((p, i) => {
+        p.sideGlyph = h('span', { class: 'glyph' });
+        updateGlyphs(p);
+        const tree = wi && wps.length > 1 ? (i === 0 ? '┌' : i === wps.length - 1 ? '└' : '│') : null;
+        box.append(h('div', {
+          class: 's-item' + (active && g.focusedPaneId === p.id ? ' focused' : '') +
+            (p.kind && p.agent === 'ask' ? ' st-ask' : '') + (p.kind && p.agent === 'done' ? ' st-done' : ''),
+          title: label(p) + (wi ? `\n(fullscreen view ${wi + 1}${wps.length > 1 ? `, split into ${wps.length}` : ''})` : '') +
+            (p.agent === 'ask' && p.askMsg ? `\n! ${p.askMsg}` : '') + '\nDouble-click to rename',
+          onclick: () => openPane(p.id),
+          ondblclick: () => renamePane(p.id),
+        }, tree ? h('span', { class: 's-tree', text: tree }) : null,
+          p.sideGlyph, h('span', { class: 's-label', text: label(p) }),
+          wi ? h('span', { class: 's-full', text: wps.length > 1 ? '⊞' : '□' }) : null));
+      });
+    });
     list.append(box);
   }
 }
@@ -1070,7 +1157,7 @@ function buildToolbar() {
   lay.replaceChildren();
   for (const pr of PRESETS) {
     lay.append(h('button', {
-      text: pr.label, title: pr.tip + ' (arranges the split panes; adds new ones if needed)',
+      text: pr.label, title: pr.tip + ' (arranges the panes of the view you see; adds new ones if needed)',
       onmousedown: (e) => e.preventDefault(),
       onclick: () => { const g = activeGroup(); if (g) applyPreset(g, pr); },
     }));
@@ -1094,6 +1181,27 @@ function updateToolbar() {
   $('#toolbar').style.visibility = g ? 'visible' : 'hidden';
   $('#welcome').classList.toggle('hidden', groups.length > 0);
   document.title = g ? `AgentMux — ${g.name}` : 'AgentMux';
+  updateViewTabs();
+}
+
+// toolbar "view 1 2 3": the main split + the group's fullscreen (child) views; hidden when there's only one
+function updateViewTabs() {
+  const box = $('#tb-views');
+  const g = activeGroup();
+  box.replaceChildren();
+  if (!g || g.wins.length < 2) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  box.append(h('span', { class: 'tb-label', text: 'view' }));
+  g.wins.forEach((w, i) => {
+    const names = leaves(w.layout).map((n) => { const p = panes.get(n.id); return p ? label(p) : n.id; });
+    box.append(h('button', {
+      class: 'vtab' + (w.id === g.win ? ' on' : ''),
+      text: String(i + 1),
+      title: (i ? `fullscreen view ${i + 1}` : 'main split') + ':\n' + names.join('\n'),
+      onmousedown: (e) => e.preventDefault(),
+      onclick: () => showWin(g, w),
+    }));
+  });
 }
 
 // ======================================================================= groups
@@ -1114,6 +1222,13 @@ function activateGroup(id) {
   saveSoon();
 }
 
+function cycleWin(delta) {
+  const g = activeGroup();
+  if (!g || g.wins.length < 2) return;
+  const i = g.wins.findIndex((w) => w.id === g.win) + delta;
+  showWin(g, g.wins[(i + g.wins.length) % g.wins.length]);
+}
+
 function cycleGroup(delta) {
   if (!groups.length) return;
   const i = groups.findIndex((g) => g.id === activeGroupId);
@@ -1121,7 +1236,7 @@ function cycleGroup(delta) {
 }
 
 function createGroup({ name, cwd, profile, presetKey }) {
-  const g = { id: uid(), name, cwd, defaultProfile: profile, focusedPaneId: null, layout: null, solo: [], zoomed: null };
+  const g = { id: uid(), name, cwd, defaultProfile: profile, focusedPaneId: null, wins: [], win: null };
   addGroupView(g);
   groups.push(g);
   applyPreset(g, PRESETS.find((p) => p.key === presetKey) || PRESETS[0], profile);
@@ -1224,8 +1339,9 @@ $('#ng-ok').addEventListener('click', submitGroupDialog);
 $('#ng-cancel').addEventListener('click', hideDialog);
 $('#help-close').addEventListener('click', hideDialog);
 $('#modal').addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') hideDialog();
+  if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); hideDialog(); }
   if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') {
+    e.preventDefault(); e.stopPropagation();
     if (dialogShown('dlg-group')) submitGroupDialog();
     else if (dialogShown('dlg-text')) submitText();
   }
@@ -1254,6 +1370,8 @@ const KEYS = {
   KeyV: () => { const p = focusedPane(); p && send({ type: 'clip-get', id: p.id }); },
   PageUp: () => cycleGroup(-1),
   PageDown: () => cycleGroup(1),
+  BracketLeft: () => cycleWin(-1),
+  BracketRight: () => cycleWin(1),
   ArrowLeft: () => moveFocus('left'),
   ArrowRight: () => moveFocus('right'),
   ArrowUp: () => moveFocus('up'),
@@ -1262,7 +1380,7 @@ const KEYS = {
   NumpadAdd: () => setFontSize(fontSize + 1),
   Minus: () => setFontSize(fontSize - 1),
   NumpadSubtract: () => setFontSize(fontSize - 1),
-  Digit0: () => setFontSize(config.fontSize || 13),
+  Digit0: () => setFontSize(config.fontSize || 15),
 };
 
 window.addEventListener('keydown', (e) => {

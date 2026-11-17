@@ -22,18 +22,21 @@ app.setPath('userData', path.join(DATA_DIR, 'chromium'));
 const SHELL_TAIL = 'exec "$SHELL" -l'; // leave a shell in the same folder when the CLI exits
 const DEFAULT_CONFIG = {
   fontFamily: "'DejaVu Sans Mono', 'Ubuntu Mono', 'Cascadia Mono', 'Liberation Mono', monospace",
-  fontSize: 13,
+  fontSize: 15,   // terminals (also the sidebar footer "term - +")
+  uiFontSize: 15, // sidebar / toolbar / pane headers (sidebar footer "ui - +")
   scrollback: 10000,
   cursorBlink: false,
   // "auto": use the GPU only if the machine has one (no /dev/dri render node, or an RDP session = software only).
   // Chromium's software GPU emulation is very CPU-heavy, so "off" is much faster on VMs.
   gpu: 'auto',
-  configVersion: 2,
+  configVersion: 3,
   defaultProfile: 'Copilot',
   // command: what a new pane runs ($SHELL -lc "<command>").
   // resume / fork: used when AgentMux knows the Claude session id ({session}) — after an app restart / for the fork button.
+  // forkInPane: typed into the running session by the fork button ({name} = the name you enter).
+  // copilot --yolo = allow all tools/paths/urls without asking (auto mode).
   profiles: [
-    { name: 'Copilot', command: `copilot; ${SHELL_TAIL}` },
+    { name: 'Copilot', command: `copilot --yolo; ${SHELL_TAIL}`, forkInPane: '/fork {name}' },
     { name: 'Claude', command: `claude; ${SHELL_TAIL}`,
       resume: `claude --resume {session}; ${SHELL_TAIL}`,
       fork: `claude --resume {session} --fork-session; ${SHELL_TAIL}` },
@@ -82,6 +85,21 @@ if (!config) {
       for (const g of state.groups) if (!g.defaultProfile || g.defaultProfile === oldDefault) g.defaultProfile = config.defaultProfile;
       writeAtomic(STATE_PATH, JSON.stringify(state));
     }
+  }
+  // v3: Copilot runs in auto mode (--yolo) and can be forked (/fork NAME); fonts 15% bigger
+  if (!(config.configVersion >= 3)) {
+    for (const p of config.profiles || []) {
+      if (!/(^|[\s;&|(])copilot(\s|;|$)/.test(p.command || '')) continue;
+      if (!/--(yolo|allow-all)\b/.test(p.command)) p.command = p.command.replace(/(^|[\s;&|(])copilot(?=\s|;|$)/, '$1copilot --yolo');
+      if (!p.forkInPane) p.forkInPane = '/fork {name}';
+    }
+    const bigger = (n) => Math.round(n * 1.15);
+    config.fontSize = config.fontSize ? bigger(config.fontSize) : DEFAULT_CONFIG.fontSize;
+    if (!config.uiFontSize) config.uiFontSize = DEFAULT_CONFIG.uiFontSize;
+    config.configVersion = 3;
+    changed = true;
+    const state = readJson(STATE_PATH);
+    if (state && state.fontSize) { state.fontSize = bigger(state.fontSize); writeAtomic(STATE_PATH, JSON.stringify(state)); }
   }
   if (changed) writeAtomic(CONFIG_PATH, JSON.stringify(config, null, 2));
 }
