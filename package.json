@@ -1,7 +1,7 @@
 {
   "name": "agentmux",
   "productName": "AgentMux",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "tmux-style terminal multiplexer for Copilot CLI / Claude Code sessions",
   "author": { "name": "AgentMux", "email": "agentmux@localhost" },
   "homepage": "https://github.com/araspudic/AgentMux",
@@ -9,10 +9,11 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --linux deb AppImage"
+    "dist": "electron-builder --linux deb AppImage",
+    "dist:win": "electron-builder --win nsis portable -c.npmRebuild=false"
   },
   "dependencies": {
-    "node-pty": "1.0.0"
+    "node-pty": "1.1.0"
   },
   "devDependencies": {
     "electron": "33.2.1",
@@ -22,6 +23,7 @@
     "appId": "local.agentmux",
     "productName": "AgentMux",
     "files": ["main.js", "preload.js", "wwwroot/**/*"],
+    "asarUnpack": ["node_modules/node-pty/**"],
     "linux": {
       "target": ["deb", "AppImage"],
       "category": "Development",
@@ -37,6 +39,19 @@
       ],
       "afterInstall": "deb/after-install.sh",
       "afterRemove": "deb/after-remove.sh"
+    },
+    "win": {
+      "target": ["nsis", "portable"],
+      "executableName": "AgentMux"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "artifactName": "AgentMux-Setup-${version}.exe",
+      "shortcutName": "AgentMux"
+    },
+    "portable": {
+      "artifactName": "AgentMux-${version}-portable.exe"
     }
   }
 }

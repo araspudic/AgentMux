@@ -12,7 +12,7 @@
   --red: #ff5f5f;
   --cyan: #5fd7d7;
   --ui-fs: 15px; /* UI font size (sidebar/toolbar/headers), changed from the sidebar footer */
-  --font: 'DejaVu Sans Mono', 'Ubuntu Mono', 'Cascadia Mono', 'Liberation Mono', monospace;
+  --font: 'DejaVu Sans Mono', 'Ubuntu Mono', 'Cascadia Mono', 'Liberation Mono', Consolas, monospace;
 }
 
 * { box-sizing: border-box; }

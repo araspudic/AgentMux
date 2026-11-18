@@ -1,6 +1,6 @@
 # AgentMux
 
-A small tmux-style terminal multiplexer for Linux (Ubuntu), made for running several
+A small tmux-style terminal multiplexer for **Linux (Ubuntu) and Windows**, made for running several
 GitHub Copilot CLI / Claude Code sessions side by side. Copilot is the default profile and runs as
 `copilot --yolo` (auto mode: no confirmation for every command).
 
@@ -71,27 +71,56 @@ Real PTYs (node-pty) rendered with xterm.js in Electron. `wwwroot/lib/` bundles
 
 ## Install
 
-Download the `.deb` from [Releases](https://github.com/araspudic/AgentMux/releases):
+Downloads are on the [Releases](https://github.com/araspudic/AgentMux/releases) page.
+
+### Linux
 
 ```bash
-sudo apt install ./agentmux_1.0.3_amd64.deb   # then run: agentmux  (or from the app menu)
+sudo apt install ./agentmux_1.0.4_amd64.deb   # then run: agentmux  (or from the app menu)
 ```
 
 The .deb pulls in its libraries and installs an AppArmor profile (`/etc/apparmor.d/agentmux`) so Electron's
-sandbox works on Ubuntu 23.10+. `AgentMux-1.0.3.AppImage` is for other distros (needs libfuse2).
+sandbox works on Ubuntu 23.10+. `AgentMux-1.0.4.AppImage` is for other distros (needs libfuse2).
+
+### Windows (10 / 11, x64)
+
+- `AgentMux-Setup-1.0.4.exe`: installs for your user only (no admin rights), with a Start-menu shortcut;
+  uninstall from Settings › Apps.
+- `AgentMux-1.0.4-portable.exe`: a single exe, nothing installed.
+
+The exes aren't code-signed, so Windows SmartScreen may warn the first time ("More info" › "Run anyway").
+Terminals run in PowerShell. Install the CLIs you want to use: Copilot CLI (`winget install GitHub.Copilot`
+or `npm install -g @github/copilot`), Claude Code (Claude's hooks need Git for Windows, which Claude Code on
+Windows requires anyway).
+
+Coming from the old Windows AgentMux (WinForms)? The new one uses the same data folder (`%APPDATA%\AgentMux`):
+your groups and panes are taken over, the profiles are converted (backups: `*.winforms-backup`) and fullscreen
+panes become fullscreen views.
 
 ## Build
 
-Needs Node 18+:
+Needs Node 18+.
+
+Linux:
 
 ```bash
 sudo apt install nodejs npm build-essential python3
 ./build.sh        # -> dist/agentmux_<version>_amd64.deb, dist/AgentMux-<version>.AppImage
 ```
 
+Windows (node-pty ships prebuilt Windows binaries, no compiler needed):
+
+```powershell
+npm install
+npm run dist:win  # -> dist\AgentMux-Setup-<version>.exe, dist\AgentMux-<version>-portable.exe
+```
+
+If electron-builder fails with "Cannot create symbolic link" (its signing tools contain macOS symlinks), turn on
+Windows Developer Mode or run the build once as administrator.
+
 ## How agent status works
 
-Claude panes are started with `--settings ~/.config/AgentMux/claude-hooks.json`. Those Claude Code hooks
+Claude panes are started with `--settings <config folder>/claude-hooks.json`. Those Claude Code hooks
 (prompt submitted, permission/question asked, tool finished, notification, stop) report the state and session id
 to AgentMux over a token-protected local socket on 127.0.0.1.
 
@@ -110,13 +139,17 @@ Copilot has no hooks, so AgentMux reads the bottom of its screen while it's draw
 3. otherwise output activity: a burst of output after you sent something → working, output stops → **done**.
 
 Pressing Esc on a pane that shows `!` clears it (and that prompt is ignored until it leaves the screen).
-`AGENTMUX_DEBUG=1 agentmux` prints every status change to the terminal.
+`AGENTMUX_DEBUG=1 agentmux` prints every status change to the terminal (Linux).
 
 ## Config
 
-Config and state live in `~/.config/AgentMux/` (⚙ button in the sidebar; restart the app to apply).
-Profiles run as `$SHELL -lc "<command>"`, e.g. `"claude; exec \"$SHELL\" -l"` — you're left in a shell in
-the same folder when the CLI exits.
+Config and state live in `~/.config/AgentMux/` (Linux) or `%APPDATA%\AgentMux\` (Windows): `config` button in
+the sidebar; restart the app to apply.
+
+- Linux: profiles run as `$SHELL -lc "<command>"`, e.g. `"claude; exec \"$SHELL\" -l"` — you're left in a shell
+  in the same folder when the CLI exits.
+- Windows: profiles run as `<shell> -NoExit -Command <command>` (`"shell": "powershell.exe"` by default,
+  `"pwsh.exe"` or `"cmd.exe"` work too), e.g. `"copilot --yolo"`; an empty command is just the shell.
 
 `"gpu": "auto"` (default) turns off GPU rendering when there's no GPU (VMs, remote desktop): Chromium's software
 GPU emulation costs a lot of CPU there. Use `"on"` / `"off"` to force it.

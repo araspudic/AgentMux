@@ -1,5 +1,6 @@
 'use strict';
-// AgentMux for Linux: Electron shell around the UI in ./wwwroot, terminals via node-pty.
+// AgentMux (Linux + Windows): Electron shell around the UI in ./wwwroot, terminals via node-pty
+// (Linux: $SHELL -lc "<command>"; Windows: PowerShell -NoExit -Command <command> in a ConPTY).
 
 const { app, BrowserWindow, ipcMain, dialog, clipboard, shell, Menu, Notification } = require('electron');
 const path = require('path');
@@ -10,6 +11,8 @@ const crypto = require('crypto');
 const pty = require('node-pty');
 
 // AGENTMUX_DATA lets a second (test) instance run with its own groups/state.
+const IS_WIN = process.platform === 'win32';
+// (on Windows this is %APPDATA%\AgentMux, the same folder the old WinForms AgentMux used: its groups carry over)
 const DATA_DIR = process.env.AGENTMUX_DATA || path.join(app.getPath('appData'), 'AgentMux');
 const STATE_PATH = path.join(DATA_DIR, 'state.json');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
@@ -19,9 +22,13 @@ const HOOK_SETTINGS = path.join(DATA_DIR, 'claude-hooks.json');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 app.setPath('userData', path.join(DATA_DIR, 'chromium'));
 
-const SHELL_TAIL = 'exec "$SHELL" -l'; // leave a shell in the same folder when the CLI exits
+// Linux: profile commands run as `$SHELL -lc "<command>; exec $SHELL -l"` (you're left in a shell in the same
+// folder when the CLI exits). Windows: `powershell -NoExit -Command <command>` already stays open, so no tail.
+const SHELL_TAIL = 'exec "$SHELL" -l';
+const tail = (cmd) => (IS_WIN ? cmd : `${cmd}; ${SHELL_TAIL}`);
 const DEFAULT_CONFIG = {
-  fontFamily: "'DejaVu Sans Mono', 'Ubuntu Mono', 'Cascadia Mono', 'Liberation Mono', monospace",
+  fontFamily: IS_WIN ? "'Cascadia Mono', Consolas, 'Courier New', monospace"
+    : "'DejaVu Sans Mono', 'Ubuntu Mono', 'Cascadia Mono', 'Liberation Mono', monospace",
   fontSize: 15,   // terminals (also the sidebar footer "term - +")
   uiFontSize: 15, // sidebar / toolbar / pane headers (sidebar footer "ui - +")
   scrollback: 10000,
@@ -31,18 +38,20 @@ const DEFAULT_CONFIG = {
   gpu: 'auto',
   configVersion: 3,
   defaultProfile: 'Copilot',
-  // command: what a new pane runs ($SHELL -lc "<command>").
+  // command: what a new pane runs (Linux: $SHELL -lc "<command>"; Windows: <shell> -NoExit -Command <command>,
+  // empty = just the shell). Windows only: "shell" = the shell to use (default powershell.exe; pwsh.exe works too).
   // resume / fork: used when AgentMux knows the Claude session id ({session}) — after an app restart / for the fork button.
   // forkInPane: typed into the running session by the fork button ({name} = the name you enter).
   // copilot --yolo = allow all tools/paths/urls without asking (auto mode).
   profiles: [
-    { name: 'Copilot', command: `copilot --yolo; ${SHELL_TAIL}`, forkInPane: '/fork {name}' },
-    { name: 'Claude', command: `claude; ${SHELL_TAIL}`,
-      resume: `claude --resume {session}; ${SHELL_TAIL}`,
-      fork: `claude --resume {session} --fork-session; ${SHELL_TAIL}` },
-    { name: 'Shell', command: SHELL_TAIL },
+    { name: 'Copilot', command: tail('copilot --yolo'), forkInPane: '/fork {name}' },
+    { name: 'Claude', command: tail('claude'),
+      resume: tail('claude --resume {session}'),
+      fork: tail('claude --resume {session} --fork-session') },
+    { name: IS_WIN ? 'PowerShell' : 'Shell', command: IS_WIN ? '' : SHELL_TAIL },
   ],
 };
+if (IS_WIN) DEFAULT_CONFIG.shell = 'powershell.exe';
 const CLAUDE_DEFAULTS = DEFAULT_CONFIG.profiles.find((p) => p.name === 'Claude');
 
 function readJson(p) {
@@ -62,6 +71,22 @@ if (!config) {
   writeAtomic(CONFIG_PATH, JSON.stringify(config, null, 2));
 } else {
   let changed = false;
+  // Windows: config of the old WinForms AgentMux (no configVersion; profiles were whole command lines such as
+  // "powershell.exe -NoLogo -NoExit -Command claude"). Keep a backup of its files, then convert the profiles.
+  if (IS_WIN && !config.configVersion && !config.shell) {
+    for (const f of [CONFIG_PATH, STATE_PATH, WINDOW_PATH]) {
+      try { if (fs.existsSync(f) && !fs.existsSync(f + '.winforms-backup')) fs.copyFileSync(f, f + '.winforms-backup'); } catch {}
+    }
+    for (const p of config.profiles || []) {
+      const c = String(p.command || '').trim();
+      const m = c.match(/^(?:powershell|pwsh)(?:\.exe)?\s+(?:-\w+\s+)*?-(?:Command|c)\s+(.+)$/i);
+      if (m) p.command = m[1];
+      else if (/^(?:powershell|pwsh)(?:\.exe)?(\s+-NoLogo)?\s*$/i.test(c)) p.command = '';
+    }
+    config.shell = DEFAULT_CONFIG.shell;
+    changed = true;
+  }
+  if (IS_WIN && !config.shell) { config.shell = DEFAULT_CONFIG.shell; changed = true; }
   for (const k of ['gpu', 'cursorBlink']) if (!(k in config)) { config[k] = DEFAULT_CONFIG[k]; changed = true; }
   for (const p of config.profiles || []) {
     if (/^\s*claude(\s|;|$)/.test(p.command || '') && !p.fork) {
@@ -107,6 +132,7 @@ if (!config) {
 // ------------------------------------------------------------------ GPU
 
 function hasUsableGpu() {
+  if (IS_WIN) return !/^RDP-/i.test(process.env.SESSIONNAME || ''); // Remote Desktop = software rendering
   if (process.env.XRDP_SESSION || process.env.LIBGL_ALWAYS_SOFTWARE === '1') return false;
   try { return fs.readdirSync('/dev/dri').some((f) => f.startsWith('renderD')); } catch { return false; }
 }
@@ -136,8 +162,10 @@ exec 3>&-
 exit 0
 `;
 
+// On Windows Claude Code runs hook commands with Git Bash, which mangles backslashes: use C:/… paths there.
+const HOOK_SCRIPT_ARG = IS_WIN ? HOOK_SCRIPT.replace(/\\/g, '/') : HOOK_SCRIPT;
 function hookSettings() {
-  const cmd = (ev) => [{ type: 'command', command: `bash '${HOOK_SCRIPT}' ${ev}`, timeout: 5 }];
+  const cmd = (ev) => [{ type: 'command', command: `bash '${HOOK_SCRIPT_ARG}' ${ev}`, timeout: 5 }];
   return {
     hooks: {
       SessionStart: [{ hooks: cmd('session') }],
@@ -181,7 +209,22 @@ function startHookServer() {
 
 // `claude ...` at the start of a command (or after ; && ||) gets the hooks settings added
 function withHooks(command) {
-  return command.replace(/(^|[;&|(]\s*)claude(?=\s|;|$)/g, '$1claude --settings "$AGENTMUX_CLAUDE_SETTINGS"');
+  const settings = IS_WIN ? `"${HOOK_SETTINGS.replace(/\\/g, '/')}"` : '"$AGENTMUX_CLAUDE_SETTINGS"';
+  return command.replace(/(^|[;&|(]\s*)claude(?=\s|;|$)/g, `$1claude --settings ${settings}`);
+}
+
+// what to run in the terminal: Linux $SHELL -lc "<command>"; Windows <shell> -NoExit -Command <command>
+// (passed as -EncodedCommand, so quotes and $ in the command survive the Windows command line)
+function shellArgs(command) {
+  if (!IS_WIN) {
+    const sh = process.env.SHELL || '/bin/bash';
+    return { file: sh, args: ['-lc', withHooks(command || SHELL_TAIL)], env: { SHELL: sh } };
+  }
+  const file = config.shell || 'powershell.exe';
+  if (/(^|[\\/])cmd(\.exe)?$/i.test(file)) return { file, args: command ? `/k ${withHooks(command)}` : '', env: {} };
+  const args = ['-NoLogo'];
+  if (command) args.push('-NoExit', '-EncodedCommand', Buffer.from(withHooks(command), 'utf16le').toString('base64'));
+  return { file, args, env: {} };
 }
 
 // ------------------------------------------------------------------ terminals
@@ -214,18 +257,19 @@ function flush() {
 
 function spawn(m) {
   kill(m.id);
-  let cwd = String(m.cwd || '').trim().replace(/^~(?=$|\/)/, os.homedir());
+  let cwd = String(m.cwd || '').trim().replace(/^~(?=$|[\\/])/, os.homedir());
   if (!cwd || !fs.existsSync(cwd)) cwd = os.homedir();
-  const sh = process.env.SHELL || '/bin/bash';
+  const sh = shellArgs(String(m.command || '').trim());
   let p;
   try {
-    p = pty.spawn(sh, ['-lc', withHooks(String(m.command || SHELL_TAIL))], {
+    p = pty.spawn(sh.file, sh.args, {
       name: 'xterm-256color',
       cols: clamp(m.cols, 120),
       rows: clamp(m.rows, 30),
       cwd,
+      useConptyDll: IS_WIN, // Windows: the newer ConPTY bundled with node-pty (better rendering than the system one)
       env: {
-        ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', SHELL: sh,
+        ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', ...sh.env,
         AGENTMUX_PANE: m.id, AGENTMUX_PORT: String(hookPort), AGENTMUX_TOKEN: HOOK_TOKEN,
         AGENTMUX_CLAUDE_SETTINGS: HOOK_SETTINGS,
       },
@@ -253,6 +297,7 @@ function kill(id) {
   ptys.delete(id);
   delete pending[id];
   const pid = p.pid;
+  if (IS_WIN) { try { p.kill(); } catch {} return; } // closing the ConPTY ends the programs attached to it
   try { process.kill(-pid, 'SIGHUP'); } catch {}
   try { p.kill(); } catch {}
   setTimeout(() => { try { process.kill(-pid, 'SIGKILL'); } catch {} }, 2000).unref();
@@ -386,6 +431,7 @@ Menu.setApplicationMenu(null);
 if (!app.requestSingleInstanceLock() && !process.env.AGENTMUX_DATA) {
   app.quit();
 } else {
+  if (IS_WIN) app.setAppUserModelId('local.agentmux'); // needed for Windows toast notifications
   app.on('second-instance', () => { if (win) { if (win.isMinimized()) win.restore(); win.focus(); } });
   startHookServer();
   app.whenReady().then(createWindow);

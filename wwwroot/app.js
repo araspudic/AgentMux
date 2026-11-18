@@ -1,5 +1,5 @@
 'use strict';
-// AgentMux UI (Linux build). Host = Electron preload (window.agentmuxHost).
+// AgentMux UI (Linux + Windows). Host = Electron preload (window.agentmuxHost).
 
 const host = window.agentmuxHost || (window.chrome && window.chrome.webview);
 const send = (m) => host && host.postMessage(m);
@@ -175,7 +175,7 @@ host && host.addEventListener('message', (ev) => {
 function init(m) {
   config = m.config || {};
   profiles = Array.isArray(config.profiles) && config.profiles.length
-    ? config.profiles : [{ name: 'Shell', command: 'exec "$SHELL" -l' }];
+    ? config.profiles : [{ name: 'Shell', command: m.platform === 'win32' ? '' : 'exec "$SHELL" -l' }];
   homeDir = m.home || '';
   useGpu = !!m.gpu;
   const st = m.state || {};
@@ -298,6 +298,7 @@ function createPane(node, g) {
   term.onResize(({ cols, rows }) => p.alive && send({ type: 'resize', id: p.id, cols, rows }));
   term.onTitleChange((t) => {
     t = (t || '').trim();
+    if (/^(?:administrator:\s*)?[a-z]:\\.*\.exe$/i.test(t)) t = ''; // Windows' default title = the program's path
     if (t === p.title) return;
     p.title = t;
     updatePaneHeader(p);
@@ -569,8 +570,10 @@ function onUserInput(p, d) {
 
 function onAgentEvent(p, ev, info) {
   p.hooked = true;
-  if (info.session && info.session !== p.node.session) { p.node.session = info.session; saveSoon(); }
+  // remember the session for resume / fork once it has a prompt (Claude doesn't keep empty sessions)
+  if (info.session && ev !== 'session' && info.session !== p.node.session) { p.node.session = info.session; saveSoon(); }
   switch (ev) {
+    case 'session': setAgent(p, 'idle'); break; // Claude (re)started and waits at its prompt (e.g. after the trust prompt)
     case 'prompt': setAgent(p, 'working'); break;
     case 'ask-tool':
       setAgent(p, 'ask', info.tool === 'ExitPlanMode' ? 'Claude wants you to approve its plan' : 'Claude has a question for you');
@@ -1195,7 +1198,7 @@ function buildToolbar() {
   add.replaceChildren();
   for (const prof of profiles) {
     add.append(h('button', {
-      text: '+' + prof.name.toLowerCase().split(' ')[0], title: `Add a ${prof.name} terminal`,
+      text: '+' + (profiles.filter((q) => q.name.split(' ')[0].toLowerCase() === prof.name.split(' ')[0].toLowerCase()).length > 1 ? prof.name : prof.name.split(' ')[0]).toLowerCase(), title: `Add a ${prof.name} terminal`,
       onmousedown: (e) => e.preventDefault(),
       onclick: () => addPane(prof.name),
     }));
