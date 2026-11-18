@@ -309,6 +309,7 @@ function handle(m) {
       break;
     case 'open-config': shell.openPath(CONFIG_PATH); break;
     case 'flash': if (win && !win.isFocused()) win.flashFrame(true); break;
+    case 'log': if (process.env.AGENTMUX_DEBUG) console.log('[ui]', String(m.text)); break;
     case 'notify':
       // desktop notification when the window isn't focused; clicking it opens the pane
       if (process.env.AGENTMUX_DEBUG) console.log('[notify]', { focused: win && win.isFocused(), supported: Notification.isSupported(), title: m.title });

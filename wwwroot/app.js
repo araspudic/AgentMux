@@ -288,6 +288,7 @@ function createPane(node, g) {
   });
 
   term.onData((d) => {
+    if (TERM_REPLY_RE.test(d)) { if (p.alive) send({ type: 'input', id: p.id, data: d }); return; } // not you typing
     p.lastInput = Date.now();
     if (p.alive) send({ type: 'input', id: p.id, data: d });
     else if (p.started && d === '\r') { restartPane(p.id); return; }
@@ -371,7 +372,7 @@ function spawn(p) {
   p.kind = agentKind(p.node.profile);
   p.started = true; p.alive = true; p.hooked = false;
   p.lastOut = 0; p.burstStart = 0; p.workStart = 0;
-  p.answeredQ = null; p.askSeen = null; p.sawBusy = false; p.lastBusy = 0;
+  p.answeredQ = null; p.askSeen = null; p.sawBusy = false; p.lastBusy = 0; p.spawnedAt = Date.now();
   setAgent(p, 'idle');
   send({ type: 'spawn', id: p.id, command, cwd: (g && g.cwd) || '', cols: p.term.cols, rows: p.term.rows });
   updateGlyphs(p);
@@ -420,17 +421,25 @@ function isWatching(p) {
 
 // Non-hooked agents (Copilot): the bottom of the screen is scanned while output is streaming (TUIs keep
 // redrawing even while they wait for you, so "output went quiet" alone can't tell asking from working).
-// "Needs your answer" is deliberately strict — only a prompt that blocks the agent until you pick/confirm:
-//   - a selection menu at the bottom of the screen: a cursor line "❯ 1. Yes" + another numbered option,
-//     with a question ("…?") right above it or a key hint ("Enter to select", "↑↓", "Esc to cancel") right below
-//   - a "(y/n)" / "[Y/n]" prompt on the last lines
+// "Needs your answer" = a prompt that blocks the agent until you answer. What Copilot CLI (1.0.11x) shows:
+//   - question form:      "Copilot needs information." … "↑/↓ select · enter accept · ctrl+d decline · esc cancel"
+//   - permission / trust: boxed "Do you want to allow this?" ❯ 1. Yes … "↑/↓ to navigate · enter to select · esc to cancel"
+//   - working:            "◎ Working ctrl+c interrupt"
+// So: the key hint of a prompt on the last lines ("enter accept", "ctrl+d decline", "enter to select"), the
+// "Copilot needs information" header, a numbered menu with a cursor at the bottom, or a "(y/n)" prompt.
+// Menus/pickers you open yourself (/model, / commands, …) are ignored: they appear right after you typed.
 // Warnings, numbered lists in answers, "Would you like me to …?" prose etc. never count.
-// Otherwise: a busy hint ("Esc to cancel", "esc to interrupt") or a burst of output = working; quiet after work = done.
+// Otherwise: a busy hint ("ctrl+c interrupt", "esc to cancel") or a burst of output = working; quiet after work = done.
 const MENU_ITEM_RE = /^[\s│┃║|]*(?:[❯›>]\s*)?\d{1,2}[.)]\s+\S/;
 const MENU_CURSOR_RE = /^[\s│┃║|]*[❯›>]\s*\d{1,2}[.)]\s+\S/;
 const MENU_HINT_RE = /(↑\s*\/?\s*↓|arrow keys|number keys|enter to (?:select|confirm|submit|choose)|to (?:select|navigate|confirm)\b|confirm with|esc to (?:cancel|skip|dismiss|deny|reject))/i;
+const ASK_HINT_RE = /\benter\s+(?:to\s+)?(?:accept|select|confirm|submit|choose|approve|answer)\b|\bctrl\+d\s+(?:to\s+)?decline\b/i;
+const ASK_FORM_RE = /\bneeds (?:your )?(?:information|input|answer|confirmation|approval)\b/i;
 const YN_RE = /(\((?:y\/n|yes\/no)\)|\[(?:y\/n|yes\/no)\])\s*:?\s*$/i;
-const BUSY_RE = /\b(?:esc|escape|ctrl\+c)\s+to\s+(?:cancel|interrupt|stop)\b/i;
+const BUSY_RE = /\b(?:esc|escape|ctrl\+c)\s+(?:to\s+)?(?:cancel|interrupt|stop)\b/i;
+// what the terminal sends by itself in reply to the program's queries (cursor position, device attributes,
+// colours, focus in/out, …) — not keyboard input
+const TERM_REPLY_RE = /^(?:\x1b\[[\d;?>=]*[cRnIOty]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[\s\S]*?\x1b\\|\x1b\[\?[\d;]*\$y)+$/;
 const cleanLine = (s) => s.replace(/[│┃║╭╮╰╯─━┌┐└┘]/g, ' ').replace(/\s+/g, ' ').trim();
 
 function onOutput(p, data) {
@@ -466,10 +475,19 @@ function screenTail(p, n) {
 
 // a blocking prompt at the bottom of the screen -> its question text, else null
 function pendingQuestion(lines) {
-  const last = lines.slice(-3);
-  const yn = last.find((l) => YN_RE.test(cleanLine(l)));
-  if (yn) return cleanLine(yn).slice(0, 140);
-  const zone = lines.slice(-14); // a menu has to be at the bottom, not somewhere up in the transcript
+  const last = lines.slice(-3).map(cleanLine);
+  const yn = last.find((t) => YN_RE.test(t));
+  if (yn) return yn.slice(0, 140);
+  const zone = lines.slice(-14); // a prompt has to be at the bottom, not somewhere up in the transcript
+  const clean = zone.map(cleanLine);
+  // Copilot's question form: "Copilot needs information." + the question on the next line
+  const form = clean.findIndex((t) => ASK_FORM_RE.test(t) && t.length < 60);
+  if (form >= 0 && last.some((t) => ASK_HINT_RE.test(t) || BUSY_RE.test(t))) return (clean[form + 1] || clean[form]).slice(0, 140);
+  // the key hint of a prompt on the last lines ("enter to select · esc to cancel", "enter accept · ctrl+d decline")
+  if (last.some((t) => ASK_HINT_RE.test(t))) {
+    const q = clean.slice(0, -1).reverse().find((t) => t.endsWith('?') && !ASK_HINT_RE.test(t));
+    return (q || 'waiting for your choice').slice(0, 140);
+  }
   const cur = zone.findIndex((l) => MENU_CURSOR_RE.test(l));
   if (cur < 0) return null;
   let first = cur, end = cur; // the block of numbered options around the cursor line
@@ -492,6 +510,11 @@ function scanScreen(p) {
   // a question you've answered / dismissed stays ignored until it has left the screen
   if (p.answeredQ && q !== p.answeredQ) p.answeredQ = null;
   if (q && q !== p.answeredQ) {
+    // a menu/picker that popped up right after you typed in an idle session is one you opened (/model, …)
+    if (p.agent !== 'ask' && p.agent !== 'working' && p.askSeen !== q && now - p.lastInput < 1500) {
+      p.answeredQ = q;
+      return;
+    }
     // must still be there a moment later (not a half-drawn frame)
     if (p.agent === 'ask' || (p.askSeen === q && now - p.askSeenAt >= 500)) { setAgent(p, 'ask', q); return; }
     if (p.askSeen !== q) { p.askSeen = q; p.askSeenAt = now; }
@@ -500,7 +523,8 @@ function scanScreen(p) {
   }
   p.askSeen = null;
   const quiet = now - p.lastOut >= 1400;
-  if (BUSY_RE.test(lines.slice(-12).join('\n'))) {
+  // busy hint ("◎ Working ctrl+c interrupt"); a prompt's own "esc to cancel" doesn't count
+  if (lines.slice(-12).map(cleanLine).some((t) => BUSY_RE.test(t) && !ASK_HINT_RE.test(t) && !MENU_HINT_RE.test(t.replace(BUSY_RE, '')))) {
     p.sawBusy = true;
     p.lastBusy = now;
     if (p.agent !== 'working') startWorking(p, now);
@@ -519,7 +543,8 @@ function scanScreen(p) {
   }
   // idle / done: a sustained burst of output means the agent started working
   // (agents that show a busy hint are only "working" while it's visible)
-  if (!p.sawBusy && !quiet && p.burstStart && p.burstLast - p.burstStart > 1200) startWorking(p, p.burstStart);
+  // (not before you typed anything: that is just the agent starting up and drawing its screen)
+  if (p.lastInput > p.spawnedAt && !p.sawBusy && !quiet && p.burstStart && p.burstLast - p.burstStart > 1200) startWorking(p, p.burstStart);
 }
 
 function startWorking(p, since) {
@@ -529,7 +554,9 @@ function startWorking(p, since) {
 
 function onUserInput(p, d) {
   if (!p.kind) return;
-  const answer = d.includes('\r') || d === '\x1b' || (p.agent === 'ask' && /^[0-9yYnN]$/.test(d));
+  // Enter / Esc / ctrl+d (decline). Digits or y/n that pick an option make the prompt go away by themselves;
+  // in a question form they're just the start of your answer.
+  const answer = d.includes('\r') || d === '\x1b' || (p.agent === 'ask' && d === '\x04');
   if (!answer) return;
   if (p.agent === 'ask') {
     if (!p.hooked) p.answeredQ = p.askMsg;
@@ -565,6 +592,7 @@ function setAgent(p, state, msg) {
   msg = state === 'ask' ? (msg || 'needs your input') : null;
   if (p.agent === state && p.askMsg === msg) return;
   const prev = p.agent;
+  send({ type: 'log', text: `${label(p)}: ${prev} -> ${state}${msg ? ` (${msg})` : ''}` }); // shown with AGENTMUX_DEBUG=1
   p.agent = state;
   p.askMsg = msg;
   if (state === 'ask') {
@@ -804,8 +832,9 @@ async function forkPane(id) {
     });
     if (!name) return;
     const cmd = prof.forkInPane.replace(/\{name\}/g, name.replace(/[\r\n]/g, ' '));
+    p.lastInput = Date.now(); // the slash-command popup is ours, not a question
     send({ type: 'input', id: p.id, data: cmd });
-    setTimeout(() => send({ type: 'input', id: p.id, data: '\r' }), 400); // after the slash-command popup settles
+    setTimeout(() => { p.lastInput = Date.now(); send({ type: 'input', id: p.id, data: '\r' }); }, 400); // after the slash-command popup settles
     p.node.name = name;
     updatePaneHeader(p);
     renderSidebar();

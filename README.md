@@ -74,11 +74,11 @@ Real PTYs (node-pty) rendered with xterm.js in Electron. `wwwroot/lib/` bundles
 Download the `.deb` from [Releases](https://github.com/araspudic/AgentMux/releases):
 
 ```bash
-sudo apt install ./agentmux_1.0.2_amd64.deb   # then run: agentmux  (or from the app menu)
+sudo apt install ./agentmux_1.0.3_amd64.deb   # then run: agentmux  (or from the app menu)
 ```
 
 The .deb pulls in its libraries and installs an AppArmor profile (`/etc/apparmor.d/agentmux`) so Electron's
-sandbox works on Ubuntu 23.10+. `AgentMux-1.0.2.AppImage` is for other distros (needs libfuse2).
+sandbox works on Ubuntu 23.10+. `AgentMux-1.0.3.AppImage` is for other distros (needs libfuse2).
 
 ## Build
 
@@ -97,14 +97,20 @@ to AgentMux over a token-protected local socket on 127.0.0.1.
 
 Copilot has no hooks, so AgentMux reads the bottom of its screen while it's drawing:
 
-1. **needs your answer** only for a prompt that blocks Copilot until you choose/confirm: a selection menu at the
-   very bottom (cursor line `❯ 1. …` + another numbered option, with a `…?` question right above it or a key hint
-   like `Enter to select` / `↑↓` right below it), or a `(y/n)` prompt on the last lines. It has to stay on screen
-   for half a second. Warnings, numbered lists in answers and "Do you want me to …?" sentences don't count;
-2. a busy hint (`Esc to cancel`, `esc to interrupt`) → **working**;
-3. otherwise output activity: a burst of output → working, output stops → **done**.
+1. **needs your answer** only for a prompt that blocks Copilot until you answer, recognised by what Copilot CLI
+   draws at the bottom of the screen (tested live with Copilot CLI 1.0.113):
+   - the question form: `Copilot needs information.` … `enter accept · ctrl+d decline · esc cancel`
+     (free-text questions and pick-one lists);
+   - permission / folder-trust menus: `Do you want to allow this?` `❯ 1. Yes …` `↑/↓ to navigate · enter to select`;
+   - a numbered menu with a cursor at the very bottom, or a `(y/n)` prompt on the last lines.
+
+   It has to stay on screen for half a second. Menus you open yourself (`/model`, the `/` command list, …) don't
+   count, nor do warnings, numbered lists in answers or "Do you want me to …?" sentences;
+2. the busy line (`◎ Working ctrl+c interrupt`) → **working**, until it's gone → **done**;
+3. otherwise output activity: a burst of output after you sent something → working, output stops → **done**.
 
 Pressing Esc on a pane that shows `!` clears it (and that prompt is ignored until it leaves the screen).
+`AGENTMUX_DEBUG=1 agentmux` prints every status change to the terminal.
 
 ## Config
 
